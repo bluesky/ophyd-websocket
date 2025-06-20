@@ -62,7 +62,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         try:
             signal = EpicsSignalRO(pv_name, name=pv_name) if readOnly else EpicsSignal(pv_name, name=pv_name)
-            signal.get()  # creates exception if can't connect to the PV
+            if requireConnection:
+                signal.get()  # creates exception if can't connect to the PV
         except Exception as e:
             await websocket.send_json({"error": f"Failed to connect to PV {pv_name}: {str(e)}"})
             if requireConnection:
