@@ -1,5 +1,6 @@
 import asyncio
 import json
+import numpy as np
 import uvicorn
 from ophyd import EpicsSignalRO, EpicsSignal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, FastAPI
@@ -30,7 +31,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"Connection closed while sending update for PV: {pv_name}")
 
         def callbackValue(value, timestamp, **kwargs):
+            if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
+                try:
+                    # Remove null bytes and convert to string
+                    cleaned_array = value[value != 0]  # Remove null terminators
+                    if len(cleaned_array) > 0:
+                        string_value = ''.join(chr(x) for x in cleaned_array)
+                        value = string_value
+                except (ValueError, OverflowError):
+                    # If conversion fails, keep original value
+                    pass
             # Runs only when the value changes, not when the signal disconnects OR reconnects
+            print(pv_name, value, type(value))
             message = {
                         "pv": pv_name,
                         "value": value,
