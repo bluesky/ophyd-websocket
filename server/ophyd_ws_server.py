@@ -114,7 +114,12 @@ async def websocket_endpoint(websocket: WebSocket):
         
         value = data.get("value")
         try:
-            value = float(value) if '.' in str(value) else int(value)
+            # Try to convert to number if it looks like one
+            if isinstance(value, str) and value.replace('.', '').replace('-', '').isdigit():
+                value = float(value) if '.' in value else int(value)
+            elif not isinstance(value, (int, float, str)):
+                raise ValueError("Value must be a string or number")
+            # If it's already a string, int, or float, keep it as-is
         except ValueError:
             await websocket.send_json({"error": f"Value must be a number. Could not set value of {pv_name} to {value}"})
             return
@@ -123,17 +128,21 @@ async def websocket_endpoint(websocket: WebSocket):
         if not isinstance(timeout, (int, float)):
             await websocket.send_json({"error": f"Timeout must be a number. Could not set value of {pv_name} to {value}"})
             return
-        low_limit = signal.low_limit
-        high_limit = signal.high_limit
-        if (low_limit is not None and value < low_limit) or (high_limit is not None and value > high_limit):
-            #area detector limits have a low limit === high limit by default.
-            if (low_limit != high_limit):
-                await websocket.send_json({"error": f"Value {value} is outside of limits for PV {pv_name}. Low limit: {low_limit}, High limit: {high_limit}"})
-                return
+        if isinstance(value, (int, float)):
+            low_limit = signal.low_limit
+            high_limit = signal.high_limit
+        
+            if (low_limit is not None and value < low_limit) or (high_limit is not None and value > high_limit):
+                #area detector limits have a low limit === high limit by default.
+                if (low_limit != high_limit):
+                    await websocket.send_json({"error": f"Value {value} is outside of limits for PV {pv_name}. Low limit: {low_limit}, High limit: {high_limit}"})
+                    return
         
         try:
-            signal.set(value).wait(timeout=timeout)
-            #signal.set(value)
+            if isinstance(value, str):
+                signal.put(value, wait=True, timeout=timeout, use_complete=True)
+            else:
+                signal.set(value).wait(timeout=timeout)
         except Exception as error:
             await websocket.send_json({"error": f"Could not set value of {pv_name} to {value}: {str(error)}"})
 
