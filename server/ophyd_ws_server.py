@@ -42,7 +42,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # If conversion fails, keep original value
                     pass
             # Runs only when the value changes, not when the signal disconnects OR reconnects
-            print(pv_name, value, type(value))
+            #print(pv_name, value, type(value))
             message = {
                         "pv": pv_name,
                         "value": value,
