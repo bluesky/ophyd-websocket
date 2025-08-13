@@ -1,15 +1,17 @@
 from typing import Union
+import os
+import urllib.request
+import urllib.error
+import json
 
 from fastapi import APIRouter, Response, status, Request, WebSocket, HTTPException
 from pydantic import BaseModel
+from ophyd import EpicsSignal
 
-try:
-    from ophyd.signal import EpicsSignal
-    m7 = EpicsSignal("IOC:m7", name="m7") # initialize a known connection for testing
-    device_dict = {"IOC:m7": m7} # initalize dictionary to hold all PVs
-except:
-    print("Connection to EPICS with IOC:m7 was not initialized due to no connection found with EPICS")
-    device_dict={}
+# Import queue server utilities
+from utils.queue_server_utils import get_queue_server_status, check_queue_server_safety
+
+device_dict={}
 
 # link for commands for a device: https://nsls-ii.github.io/ophyd/generated/ophyd.device.Device.html#ophyd.device.Device
 
@@ -18,8 +20,20 @@ class DeviceInstruction(BaseModel):
     set_value: int
     timeout: int | None = None
 
-# Create router instead of FastAPI app
 router = APIRouter()
+
+@router.get("/queue-server/status", tags=["Queue Server"])
+async def get_queue_server_status_endpoint():
+    """
+    Proxy GET request to queue server status endpoint
+    
+    Returns the status from the queue server's HTTP API at /api/status
+    Environment variables:
+    - QSERVER_HTTP_SERVER_HOST (default: localhost)
+    - QSERVER_HTTP_SERVER_PORT (default: 60610)
+    - QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY (default: test)
+    """
+    return await get_queue_server_status()
 
 @router.get("/devices", status_code=200)
 def list_devices( response: Response):
@@ -32,7 +46,7 @@ def list_devices( response: Response):
     return {"404 Error": "No devices found"}
 
 
-@router.get("/devices/{prefix}/position", status_code=200) #make plural for resources, better to keep resource more clear for what it returns
+@router.get("/devices/{prefix}/position", status_code=200)
 def read_device(prefix, response: Response):
     if prefix in device_dict:
         device = device_dict.get(prefix)
@@ -41,7 +55,7 @@ def read_device(prefix, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"404 Error": "Device " + prefix +" not found"}
 
-@router.post("/devices/{prefix}", status_code=201) #avoid verbs in endpoint names, make resource names plural
+@router.post("/devices/{prefix}", status_code=201)
 def initialize_device(prefix, response: Response):
     if prefix in device_dict:
         response.status_code = status.HTTP_409_CONFLICT # combine the response status code and the message in one line
@@ -63,19 +77,28 @@ def initialize_device(prefix, response: Response):
     
 @router.put("/device/position", status_code=200)
 async def move_device(instruction: DeviceInstruction, response: Response):
+    """
+    Move a device to a new position
+    
+    This endpoint includes safety checks to prevent device movements while
+    the queue server is running an experiment.
+    """
+    # Safety check: ensure queue server is not running
+    await check_queue_server_safety()
+    
     if instruction.pv_prefix in device_dict:
         pv = device_dict.get(instruction.pv_prefix)
         try:
             pv.set(instruction.set_value).wait(timeout=1)
             return{"200" : "Instruction accepted, set value of " + instruction.pv_prefix + " to " + str(instruction.set_value) + "."}
         except Exception as error:
-            print("Error: could not move device " + instruction.prefix)
+            print("Error: could not move device " + instruction.pv_prefix)
             print(error)
             response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-            return{"500 Error" : "Could not move device " + instruction.prefix}
+            return{"500 Error" : "Could not move device " + instruction.pv_prefix}
     else:
         response.status_code = status.HTTP_404_NOT_FOUND
-        return {"404 Error": "Device " + instruction.prefix  + " not found"}
+        return {"404 Error": "Device " + instruction.pv_prefix  + " not found"}
     
     
 @router.websocket("/ws")

@@ -12,7 +12,7 @@ from routers.core_api import router as core_api_router
 # Create the main FastAPI application
 app = FastAPI(
     title="Ophyd as a Service",
-    description="Unified FastAPI server for EPICS PV control, Ophyd device control, area detector array streaming, and more.",
+    description="Unified FastAPI server for Ophyd device control, area detector array streaming, and more.",
     version="1.0.0"
 )
 
@@ -45,7 +45,7 @@ app.add_middleware(
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_router, prefix="/api/v1", tags=["Queue Server"])
-app.include_router(core_api_router, tags=["Device Management"])
+app.include_router(core_api_router, tags=["Ophyd Device Management"])
 
 # WebSocket info endpoint
 @app.get("/websockets", tags=["WebSocket Info"])
