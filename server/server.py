@@ -1,5 +1,8 @@
 import uvicorn
 import os
+import argparse
+import logging
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +11,122 @@ from routers.pv_socket import router as pv_socket_router
 from routers.camera_socket import router as camera_router  
 from routers.qs_console_socket import router as qs_console_router
 from routers.core_api import router as core_api_router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Ophyd as a Service (OAS) - FastAPI Server")
+    parser.add_argument(
+        "--startup-dir",
+        type=str,
+        help="Startup directory path for initialization files",
+        default=None
+    )
+    return parser.parse_args()
+
+def log_environment_and_startup_info(startup_dir=None):
+    """Log all relevant environment variables and startup information"""
+    
+    # Collect all OAS and related environment variables with proper defaults
+    env_vars = {}
+    
+    # OAS specific variables with actual defaults
+    env_vars["OAS_PORT"] = os.getenv("OAS_PORT", "8001")
+    env_vars["OAS_HOST"] = os.getenv("OAS_HOST", "localhost")
+    env_vars["OAS_REQUIRE_QSERVER"] = os.getenv("OAS_REQUIRE_QSERVER", "true")
+    
+    # Queue Server variables with defaults
+    env_vars["QSERVER_HTTP_SERVER_HOST"] = os.getenv("QSERVER_HTTP_SERVER_HOST", "localhost")
+    env_vars["QSERVER_HTTP_SERVER_PORT"] = os.getenv("QSERVER_HTTP_SERVER_PORT", "60610")
+    env_vars["QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"] = os.getenv("QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY", "test")
+    
+    # EPICS related variables (these typically don't have defaults)
+    epics_vars = ["EPICS_CA_ADDR_LIST", "EPICS_CA_AUTO_ADDR_LIST", "EPICS_CA_MAX_ARRAY_BYTES"]
+    for var in epics_vars:
+        env_vars[var] = os.getenv(var, "Not set")
+    
+    # Define variable groups for organized display
+    oas_vars = ["OAS_PORT", "OAS_HOST", "OAS_REQUIRE_QSERVER"]
+    qserver_vars = ["QSERVER_HTTP_SERVER_HOST", "QSERVER_HTTP_SERVER_PORT", "QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"]
+    
+    # Build startup information message
+    startup_info = [
+        "="*80,
+        "OPHYD AS A SERVICE (OAS) - STARTUP INFORMATION",
+        "="*80,
+        f"Server Host: {env_vars['OAS_HOST']}",
+        f"Server Port: {env_vars['OAS_PORT']}",
+        "",
+        "ENVIRONMENT VARIABLES:",
+        "-" * 40,
+    ]
+    
+    # Add OAS variables
+    startup_info.append("OAS Configuration:")
+    for var in oas_vars:
+        startup_info.append(f"  {var}: {env_vars[var]}")
+    
+    startup_info.append("")
+    startup_info.append("Queue Server Configuration:")
+    for var in qserver_vars:
+        startup_info.append(f"  {var}: {env_vars[var]}")
+    
+    startup_info.append("")
+    startup_info.append("EPICS Configuration:")
+    for var in epics_vars:
+        startup_info.append(f"  {var}: {env_vars[var]}")
+    
+    # Add startup directory information
+    if startup_dir:
+        startup_info.extend([
+            "",
+            "STARTUP DIRECTORY:",
+            "-" * 40,
+            f"Startup Directory: {startup_dir}",
+        ])
+        
+        # Check if directory exists and list contents
+        startup_path = Path(startup_dir)
+        if startup_path.exists() and startup_path.is_dir():
+            startup_info.append(f"Directory Status: EXISTS")
+            try:
+                files = list(startup_path.glob("*"))
+                if files:
+                    startup_info.append("Directory Contents:")
+                    for file in sorted(files):
+                        startup_info.append(f"  - {file.name}")
+                else:
+                    startup_info.append("Directory is empty")
+            except PermissionError:
+                startup_info.append("Directory Status: Permission denied")
+        else:
+            startup_info.append(f"Directory Status: NOT FOUND")
+    else:
+        startup_info.extend([
+            "",
+            "STARTUP DIRECTORY:",
+            "-" * 40,
+            "Startup Directory: Not specified (use --startup-dir flag)",
+        ])
+    
+    startup_info.extend([
+        "",
+        "SERVER ENDPOINTS:",
+        "-" * 40,
+        f"API Documentation: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/docs",
+        f"WebSocket Info: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/websockets",
+        f"Root Endpoint: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/",
+        "="*80
+    ])
+    
+    # Log everything as one big statement
+    logger.info("\n".join(startup_info))
 
 # Create the main FastAPI application
 app = FastAPI(
@@ -130,13 +249,14 @@ def read_root():
     }
 
 if __name__ == "__main__":
-    # Get port from environment variable with OAS prefix, default to 8001
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Get configuration from environment variables
     port = int(OAS_PORT)
     host = os.getenv("OAS_HOST", "0.0.0.0")  # Use different default for server binding
     
-    print(f"Starting Ophyd as a Service (OAS) on {host}:{port}")
-    print(f"API Documentation: http://{host}:{port}/docs")
-    print(f"WebSocket Info: http://{host}:{port}/websockets")
-    print(f"Environment variables: OAS_PORT={port}, OAS_HOST={OAS_HOST}")
+    # Log comprehensive startup information
+    log_environment_and_startup_info(args.startup_dir)
     
     uvicorn.run("server:app", host=host, port=port, reload=True)

@@ -5,6 +5,7 @@ import os
 import urllib.request
 import urllib.error
 import json
+import functools
 from fastapi import HTTPException
 
 
@@ -156,6 +157,7 @@ def queue_safety_required(func):
             # This will only execute if queue is not running
             pass
     """
+    @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         await check_queue_server_safety()
         return await func(*args, **kwargs)
