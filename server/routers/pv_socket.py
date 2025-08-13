@@ -209,13 +209,5 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         print("WebSocket connection closed.")
 
-
-
-
-# For running the server directly
-
-app = FastAPI()
-app.include_router(router)
-
-if __name__ == "__main__":
-    uvicorn.run("ophyd_ws_server:app", host="0.0.0.0", port=8000, reload=True)
+# Note: This router is now included in the main server.py
+# The standalone app below is kept for reference but not used
