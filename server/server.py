@@ -238,7 +238,7 @@ app.add_middleware(
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_router, prefix="/api/v1", tags=["Queue Server"])
-app.include_router(core_api_router, tags=["Ophyd Device Management"])
+app.include_router(core_api_router)
 
 # WebSocket info endpoint
 @app.get("/websockets", tags=["WebSocket Info"])

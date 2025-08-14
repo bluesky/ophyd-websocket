@@ -25,9 +25,15 @@ class DeviceInstruction(BaseModel):
     set_value: int
     timeout: int | None = None
 
+class DeviceSetInstruction(BaseModel):
+    device: str
+    value: Union[str, int, float]
+    component: str | None = None
+    timeout: int | None = None
+
 router = APIRouter()
 
-@router.post("/load-devices", status_code=200, tags=["Device Registry"])
+@router.post("/load-devices", status_code=200, tags=["Ophyd Devices"])
 def load_devices_from_startup(response: Response):
     """
     Manually load devices from the startup directory
@@ -85,7 +91,7 @@ def load_devices_from_startup(response: Response):
             "startup_directory": startup_dir
         }
 
-@router.get("/devices", status_code=200, tags=["Device Registry"])
+@router.get("/devices", status_code=200, tags=["Ophyd Devices"])
 def list_devices():
     """
     List all devices in the device registry
@@ -107,7 +113,7 @@ def list_devices():
             "message": "No devices found in registry. Use --startup-dir to load devices from Python files."
         }
 
-@router.get("/devices/{device_name}", status_code=200, tags=["Device Registry"])
+@router.get("/devices/{device_name}", status_code=200, tags=["Ophyd Devices"])
 def get_device_info(device_name: str, response: Response):
     """
     Get detailed information about a specific device
@@ -121,7 +127,7 @@ def get_device_info(device_name: str, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"error": f"Device '{device_name}' not found in registry"}
 
-@router.get("/devices-info", status_code=200, tags=["Device Registry"])  
+@router.get("/devices-info", status_code=200, tags=["Ophyd Devices"])  
 def get_all_devices_info():
     """
     Get detailed information about all devices in the registry
@@ -132,6 +138,90 @@ def get_all_devices_info():
         "devices": device_registry.get_all_device_info(),
         "count": len(device_registry.list_devices())
     }
+
+@router.put("/devices", status_code=200, tags=["Ophyd Devices"])
+@queue_safety_required
+async def set_device_value(instruction: DeviceSetInstruction, response: Response):
+    """
+    Set a value on a device from the device registry
+    
+    This endpoint includes safety checks to prevent device movements while
+    the queue server RE is running a plan.
+    
+    Args:
+        instruction: Device set instruction containing:
+            - device: Name of the device in the registry
+            - value: Value to set (string, int, or float)
+            - component: Optional component name to target specific part of device
+            - timeout: Optional timeout for the set operation
+    """
+    # Check if device exists in registry
+    device = device_registry.get_device(instruction.device)
+    if not device:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {
+            "error": f"Device '{instruction.device}' not found in registry",
+            "available_devices": device_registry.list_devices()
+        }
+    
+    try:
+        # Determine target object (device or component)
+        target = device
+        target_name = instruction.device
+        
+        if instruction.component:
+            if not hasattr(device, instruction.component):
+                response.status_code = status.HTTP_400_BAD_REQUEST
+                return {
+                    "error": f"Component '{instruction.component}' not found on device '{instruction.device}'",
+                    "device_type": type(device).__name__
+                }
+            target = getattr(device, instruction.component)
+            target_name = f"{instruction.device}.{instruction.component}"
+        
+        # Check if target has set method
+        if not hasattr(target, 'set'):
+            response.status_code = status.HTTP_400_BAD_REQUEST
+            return {
+                "error": f"Target '{target_name}' does not support set operations",
+                "target_type": type(target).__name__
+            }
+        
+        # Perform the set operation
+        set_result = target.set(instruction.value)
+        
+        # Apply timeout if specified
+        if instruction.timeout is not None:
+            set_result.wait(timeout=instruction.timeout)
+            return {
+                "success": True,
+                "message": f"Successfully set {target_name} to {instruction.value} (with timeout {instruction.timeout}s)",
+                "device": instruction.device,
+                "component": instruction.component,
+                "value": instruction.value,
+                "timeout": instruction.timeout
+            }
+        else:
+            return {
+                "success": True,
+                "message": f"Set operation initiated for {target_name} to {instruction.value}",
+                "device": instruction.device,
+                "component": instruction.component,
+                "value": instruction.value,
+                "note": "No timeout specified - operation may complete asynchronously"
+            }
+        
+    except Exception as error:
+        logger.error(f"Could not set device {target_name} to {instruction.value}")
+        logger.error(f"Error details: {error}")
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {
+            "error": f"Failed to set {target_name}",
+            "message": str(error),
+            "device": instruction.device,
+            "component": instruction.component,
+            "value": instruction.value
+        }
 
 @router.get("/queue-server/status", tags=["Queue Server"])
 async def get_queue_server_status_endpoint():
@@ -146,7 +236,7 @@ async def get_queue_server_status_endpoint():
     """
     return await get_queue_server_status()
 
-@router.get("/pvs", status_code=200)
+@router.get("/pvs", status_code=200, tags=["EPICS PVs"])
 def list_connected_pvs( response: Response):
     if len(pv_dict) > 0:
         # send a response including the names of all devices
@@ -157,7 +247,7 @@ def list_connected_pvs( response: Response):
     return {"404 Error": "No devices found"}
 
 
-@router.get("/pvs/{pv}", status_code=200)
+@router.get("/pvs/{pv}", status_code=200, tags=["EPICS PVs"])
 def read_pv_value(pv, response: Response):
     if pv in pv_dict:
         signal = pv_dict.get(pv)
@@ -166,7 +256,7 @@ def read_pv_value(pv, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"404 Error": "PV " + pv + " not found"}
 
-@router.post("/pvs/{pv}", status_code=201)
+@router.post("/pvs/{pv}", status_code=201, tags=["EPICS PVs"])
 def connect_to_pv(pv, response: Response):
     if pv in pv_dict:
         response.status_code = status.HTTP_409_CONFLICT # combine the response status code and the message in one line
@@ -186,7 +276,7 @@ def connect_to_pv(pv, response: Response):
         pv_dict[pv] = testSignal
         return {"201" : "PV " + pv + " is connected"}
     
-@router.put("/pvs", status_code=200)
+@router.put("/pvs", status_code=200, tags=["EPICS PVs"])
 @queue_safety_required
 async def set_pv_value(instruction: DeviceInstruction, response: Response):
     """
