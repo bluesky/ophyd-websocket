@@ -11,6 +11,7 @@ from ophyd import EpicsSignal
 
 # Import queue server utilities
 from utils.queue_server_utils import get_queue_server_status, queue_safety_required
+from utils.device_registry import device_registry
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -26,6 +27,112 @@ class DeviceInstruction(BaseModel):
 
 router = APIRouter()
 
+@router.post("/load-devices", status_code=200, tags=["Device Registry"])
+def load_devices_from_startup(response: Response):
+    """
+    Manually load devices from the startup directory
+    
+    This endpoint loads devices from the startup directory that was specified
+    when the server was started with --startup-dir flag. Useful for reloading
+    devices without restarting the server.
+    """
+    logger.info("[LOAD_DEVICES] Endpoint called")
+    
+    # Get startup directory from device registry
+    startup_dir = device_registry.get_startup_dir()
+    logger.info(f"[LOAD_DEVICES] Retrieved startup directory: {startup_dir}")
+    
+    if not startup_dir:
+        logger.warning("[LOAD_DEVICES] No startup directory found - returning error")
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {
+            "error": "No startup directory specified",
+            "message": "Server was not started with --startup-dir flag. Cannot load devices.",
+            "suggestion": "Restart server with: python server.py --startup-dir /path/to/startup/files"
+        }
+    
+    try:
+        logger.info(f"[LOAD_DEVICES] Starting device loading process from: {startup_dir}")
+        
+        # Clear existing devices first
+        device_count_before = len(device_registry.list_devices())
+        logger.info(f"[LOAD_DEVICES] Device count before clearing: {device_count_before}")
+        device_registry.clear()
+        
+        # Load devices from startup directory
+        logger.info(f"[LOAD_DEVICES] Loading devices from: {startup_dir}")
+        device_registry.load_startup_files(startup_dir)
+        
+        devices = device_registry.list_devices()
+        logger.info(f"[LOAD_DEVICES] Successfully loaded {len(devices)} devices: {devices}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully loaded {len(devices)} devices from startup directory",
+            "startup_directory": startup_dir,
+            "devices_loaded": devices,
+            "previous_device_count": device_count_before,
+            "new_device_count": len(devices)
+        }
+        
+    except Exception as e:
+        logger.error(f"[LOAD_DEVICES] Error loading devices: {str(e)}")
+        logger.exception(e)
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {
+            "error": "Failed to load devices",
+            "message": str(e),
+            "startup_directory": startup_dir
+        }
+
+@router.get("/devices", status_code=200, tags=["Device Registry"])
+def list_devices():
+    """
+    List all devices in the device registry
+    
+    Returns a list of device names that have been loaded from startup files
+    or manually added to the registry.
+    """
+    devices = device_registry.list_devices()
+    if devices:
+        return {
+            "devices": devices,
+            "count": len(devices),
+            "message": f"Found {len(devices)} devices in registry"
+        }
+    else:
+        return {
+            "devices": [],
+            "count": 0,
+            "message": "No devices found in registry. Use --startup-dir to load devices from Python files."
+        }
+
+@router.get("/devices/{device_name}", status_code=200, tags=["Device Registry"])
+def get_device_info(device_name: str, response: Response):
+    """
+    Get detailed information about a specific device
+    
+    Returns device information including type, connection status, and description
+    """
+    info = device_registry.get_device_info(device_name)
+    if info:
+        return info
+    else:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": f"Device '{device_name}' not found in registry"}
+
+@router.get("/devices-info", status_code=200, tags=["Device Registry"])  
+def get_all_devices_info():
+    """
+    Get detailed information about all devices in the registry
+    
+    Returns comprehensive information for all registered devices
+    """
+    return {
+        "devices": device_registry.get_all_device_info(),
+        "count": len(device_registry.list_devices())
+    }
+
 @router.get("/queue-server/status", tags=["Queue Server"])
 async def get_queue_server_status_endpoint():
     """
@@ -40,7 +147,7 @@ async def get_queue_server_status_endpoint():
     return await get_queue_server_status()
 
 @router.get("/pvs", status_code=200)
-def list_pvs( response: Response):
+def list_connected_pvs( response: Response):
     if len(pv_dict) > 0:
         # send a response including the names of all devices
         pv_dict.keys()
@@ -51,7 +158,7 @@ def list_pvs( response: Response):
 
 
 @router.get("/pvs/{pv}", status_code=200)
-def read_device(pv, response: Response):
+def read_pv_value(pv, response: Response):
     if pv in pv_dict:
         signal = pv_dict.get(pv)
         return signal.read()
@@ -60,7 +167,7 @@ def read_device(pv, response: Response):
         return {"404 Error": "PV " + pv + " not found"}
 
 @router.post("/pvs/{pv}", status_code=201)
-def initialize_device(pv, response: Response):
+def connect_to_pv(pv, response: Response):
     if pv in pv_dict:
         response.status_code = status.HTTP_409_CONFLICT # combine the response status code and the message in one line
         return {"409 Error" : "PV " + pv + " already exists, duplicate connections not allowed"} #returns 200 status with error
@@ -81,7 +188,7 @@ def initialize_device(pv, response: Response):
     
 @router.put("/pvs", status_code=200)
 @queue_safety_required
-async def set_pv(instruction: DeviceInstruction, response: Response):
+async def set_pv_value(instruction: DeviceInstruction, response: Response):
     """
     Move a device to a new position
     

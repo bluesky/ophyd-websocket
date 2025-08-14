@@ -3,6 +3,7 @@ import os
 import argparse
 import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -11,6 +12,9 @@ from routers.pv_socket import router as pv_socket_router
 from routers.camera_socket import router as camera_router  
 from routers.qs_console_socket import router as qs_console_router
 from routers.core_api import router as core_api_router
+
+# Import device registry
+from utils.device_registry import device_registry
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +44,8 @@ def log_environment_and_startup_info(startup_dir=None):
     env_vars["OAS_PORT"] = os.getenv("OAS_PORT", "8001")
     env_vars["OAS_HOST"] = os.getenv("OAS_HOST", "localhost")
     env_vars["OAS_REQUIRE_QSERVER"] = os.getenv("OAS_REQUIRE_QSERVER", "true")
+    env_vars["OAS_ALLOWED_ORIGINS"] = os.getenv("OAS_ALLOWED_ORIGINS", "Not set")
+    env_vars["OAS_STARTUP_DIR"] = os.getenv("OAS_STARTUP_DIR", "Not set")
     
     # Queue Server variables with defaults
     env_vars["QSERVER_HTTP_SERVER_HOST"] = os.getenv("QSERVER_HTTP_SERVER_HOST", "localhost")
@@ -52,7 +58,7 @@ def log_environment_and_startup_info(startup_dir=None):
         env_vars[var] = os.getenv(var, "Not set")
     
     # Define variable groups for organized display
-    oas_vars = ["OAS_PORT", "OAS_HOST", "OAS_REQUIRE_QSERVER"]
+    oas_vars = ["OAS_PORT", "OAS_HOST", "OAS_REQUIRE_QSERVER", "OAS_ALLOWED_ORIGINS", "OAS_STARTUP_DIR"]
     qserver_vars = ["QSERVER_HTTP_SERVER_HOST", "QSERVER_HTTP_SERVER_PORT", "QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"]
     
     # Build startup information message
@@ -122,17 +128,59 @@ def log_environment_and_startup_info(startup_dir=None):
         f"API Documentation: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/docs",
         f"WebSocket Info: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/websockets",
         f"Root Endpoint: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/",
-        "="*80
+        f"Device Registry: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/devices",
+        f"Load Devices: http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/load-devices",
+        "",
+        "DEVICE REGISTRY:",
+        "-" * 40,
     ])
+    
+    # Add device registry information
+    if startup_dir:
+        startup_info.append(f"Startup Directory: {startup_dir}")
+        startup_info.append("Device Loading: Manual (use POST /load-devices endpoint)")
+        startup_info.append(f"Load Command: curl -X POST http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/load-devices")
+    else:
+        startup_info.append("No startup directory specified - no devices will be loaded")
+        startup_info.append("Use --startup-dir flag to enable device loading")
+    
+    startup_info.append("="*80)
     
     # Log everything as one big statement
     logger.info("\n".join(startup_info))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown"""
+    # Startup - set startup directory from environment variable
+    logger.info("[LIFESPAN] FastAPI startup event triggered")
+    
+    # Get startup directory from environment variable set by main process
+    startup_dir = os.getenv("OAS_STARTUP_DIR")
+    logger.info(f"[LIFESPAN] OAS_STARTUP_DIR environment variable: {startup_dir}")
+    
+    if startup_dir:
+        logger.info(f"[LIFESPAN] Setting startup directory in device registry: {startup_dir}")
+        device_registry.set_startup_dir(startup_dir)
+    else:
+        logger.info("[LIFESPAN] No startup directory found in environment")
+    
+    # Verify the startup directory is properly set
+    stored_dir = device_registry.get_startup_dir()
+    logger.info(f"[LIFESPAN] Final startup directory in registry: {stored_dir}")
+    logger.info("[LIFESPAN] Server ready - use /load-devices endpoint to load devices")
+    
+    yield
+    
+    # Shutdown (if needed)
+    logger.info("[LIFESPAN] FastAPI shutdown: Cleaning up...")
 
 # Create the main FastAPI application
 app = FastAPI(
     title="Ophyd as a Service",
     description="Unified FastAPI server for Ophyd device control, area detector array streaming, and more.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Get configuration from environment variables once
@@ -140,6 +188,26 @@ OAS_PORT = os.getenv("OAS_PORT", "8001")
 OAS_HOST = os.getenv("OAS_HOST", "localhost")
 BASE_WS_URL = f"ws://{OAS_HOST}:{OAS_PORT}"
 BASE_HTTP_URL = f"http://{OAS_HOST}:{OAS_PORT}"
+
+# Parse additional CORS origins from environment variable
+def parse_allowed_origins():
+    """Parse OAS_ALLOWED_ORIGINS environment variable"""
+    oas_origins = os.getenv("OAS_ALLOWED_ORIGINS", "")
+    if not oas_origins:
+        return []
+    
+    # Handle both single string and comma-separated list
+    if oas_origins.startswith("[") and oas_origins.endswith("]"):
+        # Handle array-like format: ["origin1", "origin2"]
+        try:
+            import json
+            return json.loads(oas_origins)
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON format in OAS_ALLOWED_ORIGINS: {oas_origins}")
+            return []
+    else:
+        # Handle comma-separated string: "origin1,origin2"
+        return [origin.strip() for origin in oas_origins.split(",") if origin.strip()]
 
 # Configure CORS
 origins = [
@@ -151,6 +219,12 @@ origins = [
     "http://localhost:5173",
     "*"
 ]
+
+# Add custom origins from environment variable
+custom_origins = parse_allowed_origins()
+if custom_origins:
+    origins.extend(custom_origins)
+    logger.info(f"Added custom CORS origins: {custom_origins}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -252,11 +326,20 @@ if __name__ == "__main__":
     # Parse command line arguments
     args = parse_arguments()
     
+    logger.info(f"[SERVER] Parsed startup directory argument: {args.startup_dir}")
+    
+    # Store startup directory in environment variable so it persists across uvicorn reloads
+    if args.startup_dir:
+        logger.info(f"[SERVER] Setting OAS_STARTUP_DIR environment variable: {args.startup_dir}")
+        os.environ["OAS_STARTUP_DIR"] = args.startup_dir
+    else:
+        logger.info("[SERVER] No startup directory provided")
+    
     # Get configuration from environment variables
     port = int(OAS_PORT)
     host = os.getenv("OAS_HOST", "0.0.0.0")  # Use different default for server binding
     
-    # Log comprehensive startup information
+    # Log comprehensive startup information (before device loading)
     log_environment_and_startup_info(args.startup_dir)
     
     uvicorn.run("server:app", host=host, port=port, reload=True)
