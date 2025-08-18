@@ -55,7 +55,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
                 print(f"Connection closed while sending update for PV: {pv_name}")
-
+        
         signal.subscribe(callbackMd, event_type='meta')
         signal.subscribe(callbackValue, event_type='value')
         subscriptions[pv_name] = signal
@@ -208,6 +208,3 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"Error in websocket loop: {str(e)}")
     finally:
         print("WebSocket connection closed.")
-
-# Note: This router is now included in the main server.py
-# The standalone app below is kept for reference but not used

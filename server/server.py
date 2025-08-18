@@ -12,6 +12,7 @@ from routers.pv_socket import router as pv_socket_router
 from routers.camera_socket import router as camera_router  
 from routers.qs_console_socket import router as qs_console_router
 from routers.core_api import router as core_api_router
+from routers.device_socket import router as device_socket_router
 
 # Import device registry
 from utils.device_registry import device_registry
@@ -238,6 +239,7 @@ app.add_middleware(
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_router, prefix="/api/v1", tags=["Queue Server"])
+app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router)
 
 # WebSocket info endpoint
@@ -265,9 +267,9 @@ def list_websockets():
                 "protocol": "ZMQ bridge to WebSocket"
             },
             "device_websocket": {
-                "endpoint": "/ws",
-                "description": "General device WebSocket for testing",
-                "example_url": f"{BASE_WS_URL}/ws",
+                "endpoint": "/api/v1/devices",
+                "description": "Real-time ophyd device control and monitoring",
+                "example_url": f"{BASE_WS_URL}/api/v1/devices",
                 "type": "Echo WebSocket"
             }
         },
@@ -310,7 +312,7 @@ def read_root():
                 "pv_monitor": f"{BASE_WS_URL}/api/v1/ophydSocket",
                 "camera_stream": f"{BASE_WS_URL}/api/v1/pvcamera", 
                 "queue_server": f"{BASE_WS_URL}/api/v1/queue_server",
-                "device_websocket": f"{BASE_WS_URL}/ws"
+                "device_websocket": f"{BASE_WS_URL}/api/v1/devices"
             },
             "rest_api": {
                 "devices": f"{BASE_HTTP_URL}/devices",

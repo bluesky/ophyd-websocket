@@ -11,8 +11,8 @@ automatically detected and added to the registry.
 from ophyd import EpicsSignal, EpicsMotor, Device, Component
 
 # Simple EPICS signals - these will be detected and added to registry
-motor1 = EpicsSignal("IOC:m1", name="motor1")
-motor2 = EpicsMotor("IOC:m2", name="motor2")
+sim_motor1 = EpicsSignal("IOC:m1", name="motor1")
+sim_motor2 = EpicsMotor("IOC:m2", name="motor2")
 detector_counts = EpicsSignal("IOC:detector:counts", name="detector_counts")
 
 # Custom Ophyd Device class
@@ -36,6 +36,6 @@ print("- sample_motor, scan_motor (SimpleMotor devices)")
 
 from ophyd.sim import hw
 
-# Import ALL simulated Ophyd objects in global namespace (borrowed from ophyd.sim)
-globals().update(hw().__dict__)
-del hw
+# # Import ALL simulated Ophyd objects in global namespace (borrowed from ophyd.sim)
+# globals().update(hw().__dict__)
+# del hw
