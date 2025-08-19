@@ -23,6 +23,13 @@ class SimpleMotor(Device):
 
 sim_motor_device = SimpleMotor("IOC:", name="sim_motor_device")
 
+class RealMotor(Device):
+    """A simple motor device with position and velocity"""
+    m1 = Component(EpicsMotor, "m1")
+    m2 = Component(EpicsMotor, "m2")
+
+real_motor_device = RealMotor("IOC:", name="real_motor_device")
+
 # This will NOT be detected (it's a class, not an instance)
 class AnotherDevice(Device):
     pass

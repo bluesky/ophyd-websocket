@@ -18,14 +18,11 @@ async def websocket_endpoint(websocket: WebSocket):
         loop = asyncio.get_event_loop()
 
     def addCallbacks(device_name, device):
-
-
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
         # EpicsMotor: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done'
         # Component: 'acq_done'
         connection_state = {"connected": None, "last_update": 0}
-
 
         def callbackMd(**kwargs):
             # Triggered on changes to metadata, including 'connected'
@@ -59,6 +56,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     pass
             # Runs only when the value changes, not when the device disconnects OR reconnects
             #print(device_name, value, type(value))
+            message = {key: value for key, value in kwargs.items()}
+            print(message)
             message = {
                         "device": device_name,
                         "value": value,
@@ -66,32 +65,29 @@ async def websocket_endpoint(websocket: WebSocket):
                         "connected": device.connected, #might take this out since redundant with meta
                         "read_access": getattr(device, 'read_access', None),
                         "write_access": getattr(device, 'write_access', None),
+                        "name": kwargs.get('obj', None).name if kwargs.get('obj', None) else None,
                     }
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
                 print(f"Connection closed while sending update for device: {device_name}")
 
-        if isinstance(device, (EpicsSignal, EpicsSignalRO)):
-            device.subscribe(callbackMd, event_type='meta')
-            device.subscribe(callbackValue, event_type='value')
-        elif isinstance(device, EpicsMotor):
-            device.subscribe(callbackValue, event_type='readback')
-            for walk in device.walk_signals():
-                try:
-                    walk.item.subscribe(callbackMd, event_type='meta')
-                except Exception as e:
-                    print(f"Error subscribing to metadata for {walk.item.name}: {str(e)}")
-        else:
-            for walk in device.walk_signals():
-                try:
-                    walk.item.subscribe(callbackMd, event_type='meta')
-                except Exception as e:
-                    print(f"Error subscribing to metadata for {walk.item.name}: {str(e)}")
-                try: walk.item.subscribe(callbackValue, event_type='value')
-                except Exception as e:
-                    print(f"Error subscribing to value for {walk.item.name}: {str(e)}")
+        def recursively_subscribe(device, name=None, parent=None):
+            if isinstance(device, (EpicsSignal, EpicsSignalRO)):
+                device.subscribe(callbackMd, event_type='meta')
+                device.subscribe(callbackValue, event_type='value')
+            elif isinstance(device, EpicsMotor):
+                device.subscribe(callbackValue, event_type='readback')
+                for signal in device.walk_signals():
+                    signal.item.subscribe(callbackMd, event_type='meta')
+            else:
+                for name in device.component_names:
+                    recursively_subscribe(getattr(device, name))
+
+        recursively_subscribe(device)
+
         subscriptions[device_name] = device
+
 
     async def handleSubscribe(data, requireConnection=False, readOnly=False):
         #allows user to subscribe to any device from the device registry
