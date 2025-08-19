@@ -1,9 +1,10 @@
 import asyncio
 import json
 import numpy as np
-from ophyd import EpicsSignalRO, EpicsSignal
+from ophyd import EpicsSignalRO, EpicsSignal, Device, EpicsMotor
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from utils.device_registry import device_registry
+import time
 
 router = APIRouter()
 
@@ -18,6 +19,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
     def addCallbacks(device_name, device):
 
+
+        # different ophyd devices may have different event types that are subscribable
+        # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
+        # EpicsMotor: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done'
+        # Component: 'acq_done'
+        connection_state = {"connected": None, "last_update": 0}
+
+
         def callbackMd(**kwargs):
             # Triggered on changes to metadata, including 'connected'
             # Will trigger when device first connects, when the device is disconnected/reconnected
@@ -25,10 +34,17 @@ async def websocket_endpoint(websocket: WebSocket):
             message = {key: value for key, value in kwargs.items()}
             message['obj'] = device_name #obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
             message['device'] = device_name #to be consistent with the message from callbackValue()
-            try:
-                asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-            except WebSocketDisconnect:
-                print(f"Connection closed while sending update for device: {device_name}")
+
+            if message.get('connected') is not None:
+                current_connection = message.get('connected')
+                if current_connection != connection_state["connected"]:
+                    # Only update connection state & send ws message if it has changed
+                    connection_state["connected"] = current_connection
+                    connection_state["last_update"] = time.time()
+                    try:
+                        asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                    except WebSocketDisconnect:
+                        print(f"Connection closed while sending update for device: {device_name}")
 
         def callbackValue(value, timestamp, **kwargs):
             if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
@@ -47,16 +63,34 @@ async def websocket_endpoint(websocket: WebSocket):
                         "device": device_name,
                         "value": value,
                         "timestamp": timestamp,
-                        "connected": device.connected,
-                        "read_access": device.read_access,
-                        "write_access": device.write_access,
+                        "connected": device.connected, #might take this out since redundant with meta
+                        "read_access": getattr(device, 'read_access', None),
+                        "write_access": getattr(device, 'write_access', None),
                     }
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
                 print(f"Connection closed while sending update for device: {device_name}")
-        device.subscribe(callbackMd, event_type='meta')
-        device.subscribe(callbackValue, event_type='value')
+
+        if isinstance(device, (EpicsSignal, EpicsSignalRO)):
+            device.subscribe(callbackMd, event_type='meta')
+            device.subscribe(callbackValue, event_type='value')
+        elif isinstance(device, EpicsMotor):
+            device.subscribe(callbackValue, event_type='readback')
+            for walk in device.walk_signals():
+                try:
+                    walk.item.subscribe(callbackMd, event_type='meta')
+                except Exception as e:
+                    print(f"Error subscribing to metadata for {walk.item.name}: {str(e)}")
+        else:
+            for walk in device.walk_signals():
+                try:
+                    walk.item.subscribe(callbackMd, event_type='meta')
+                except Exception as e:
+                    print(f"Error subscribing to metadata for {walk.item.name}: {str(e)}")
+                try: walk.item.subscribe(callbackValue, event_type='value')
+                except Exception as e:
+                    print(f"Error subscribing to value for {walk.item.name}: {str(e)}")
         subscriptions[device_name] = device
 
     async def handleSubscribe(data, requireConnection=False, readOnly=False):
