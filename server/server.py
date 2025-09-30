@@ -240,10 +240,10 @@ app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
-app.include_router(core_api_router)
+app.include_router(core_api_router, prefix="/api/v1")
 
 # WebSocket info endpoint
-@app.get("/websockets", tags=["WebSocket Info"])
+@app.get("/api/v1/websockets", tags=["WebSocket Info"])
 def list_websockets():
     """List all available WebSocket endpoints with connection details"""
     return {
@@ -305,10 +305,10 @@ def read_root():
                 "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },
             "rest_api": {
-                "devices": f"{BASE_HTTP_URL}/devices",
-                "websocket_info": f"{BASE_HTTP_URL}/websockets",
-                "docs": f"{BASE_HTTP_URL}/docs",
-                "openapi": f"{BASE_HTTP_URL}/openapi.json"
+                "devices": f"{BASE_HTTP_URL}/api/v1/devices",
+                "websocket_info": f"{BASE_HTTP_URL}/api/v1/websockets",
+                "docs": f"{BASE_HTTP_URL}/api/v1/docs",
+                "openapi": f"{BASE_HTTP_URL}/api/v1/openapi.json"
             }
         },
         "description": "This server provides WebSocket endpoints for EPICS PV monitoring, camera streaming, queue server communication, and REST API endpoints for device management."
