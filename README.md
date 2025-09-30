@@ -145,7 +145,7 @@ In addition to subscribing to PVs, where you must provide the exact PV name, you
 ## "Ophyd as a Service" REST API
 After starting the server navigate to [http://localhost:8001/docs](http://localhost:8001/docs) to see endpoints and try out functionality. 
 
-You can load up predefined Ophyd devices with a POST request to `http://localhost:8001/load-devices`.
+You can load up predefined Ophyd devices with a POST request to `http://localhost:8001/api/v1/load-devices`.
 
 These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
 
@@ -177,3 +177,8 @@ Socket Endpoint: /api/v1/qs-console-socket
 ## Stream Area Detector Images
 Socket Endpoint: /api/v1/camera-socket
 
+# Docker setup
+```bash
+docker build -t ophyd-websocket . 
+docker run -p 8001:8001 ophyd-websocket
+```
