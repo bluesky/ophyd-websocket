@@ -8,7 +8,7 @@ import {
 } from './ophydSocketTypes';
 
 export default function useOphydSocket(deviceNameList: string[], wsUrl?: string) {
-    const apiUrl:string = wsUrl ? wsUrl : (import.meta.env.VITE_OPHYD_WS || "ws://localhost:8000/ophydSocket");
+    const apiUrl:string = wsUrl ? wsUrl : (import.meta.env.VITE_OPHYD_WS || "ws://localhost:8001/api/v1/pv-socket");
     const [devices, setDevices] = useState<Devices>({});
     const wsRef = useRef<WebSocket | null>(null);
     console.log('running hook')
