@@ -8,7 +8,7 @@ import time
 
 router = APIRouter()
 
-@router.websocket("/devices")
+@router.websocket("/device-socket")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
        
@@ -31,17 +31,27 @@ async def websocket_endpoint(websocket: WebSocket):
             message = {key: value for key, value in kwargs.items()}
             message['obj'] = device_name #obj is an EpicsSignal which is not JSON serializable, overwrite it so the msg will send
             message['device'] = device_name #to be consistent with the message from callbackValue()
+            message['signal'] = kwargs.get('obj', None).name if kwargs.get('obj', None) else None #provides the specific signal name within the device
 
             if message.get('connected') is not None:
                 current_connection = message.get('connected')
+                # Only update connection state & send ws message if it has changed
                 if current_connection != connection_state["connected"]:
-                    # Only update connection state & send ws message if it has changed
-                    connection_state["connected"] = current_connection
-                    connection_state["last_update"] = time.time()
-                    try:
-                        asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-                    except WebSocketDisconnect:
-                        print(f"Connection closed while sending update for device: {device_name}")
+                    #if even one signal is disconnected, always send message that device is disconnected
+                    if current_connection == False:
+                        connection_state["connected"] = current_connection
+                        connection_state["last_update"] = time.time()
+                        try:
+                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                        except WebSocketDisconnect:
+                            print(f"Connection closed while sending update for device: {device_name}")
+                    if current_connection == True:
+                        # TODO: verify that the all signals in device are connected before sending connected=true message
+                        #device.connected
+                        try:
+                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
+                        except WebSocketDisconnect:
+                            print(f"Connection closed while sending update for device: {device_name}")
 
         def callbackValue(value, timestamp, **kwargs):
             if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
@@ -57,7 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # Runs only when the value changes, not when the device disconnects OR reconnects
             #print(device_name, value, type(value))
             message = {key: value for key, value in kwargs.items()}
-            print(message)
+            #print(message)
             message = {
                         "device": device_name,
                         "value": value,
@@ -65,7 +75,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "connected": device.connected, #might take this out since redundant with meta
                         "read_access": getattr(device, 'read_access', None),
                         "write_access": getattr(device, 'write_access', None),
-                        "name": kwargs.get('obj', None).name if kwargs.get('obj', None) else None,
+                        "signal": kwargs.get('obj', None).name if kwargs.get('obj', None) else None,
                     }
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)

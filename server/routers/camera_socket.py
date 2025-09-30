@@ -32,7 +32,7 @@ max_dimension = 2500 #maximum pixel width or height to be sent out. Increase if 
 router = APIRouter()
 
 
-@router.websocket("/pvcamera")
+@router.websocket("/camera-socket")
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 

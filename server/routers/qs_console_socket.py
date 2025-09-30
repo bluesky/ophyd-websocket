@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 
 router = APIRouter()
 
-@router.websocket("/queue_server")
+@router.websocket("/qs-console-socket")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logging.info("New WebSocket connection")

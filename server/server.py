@@ -9,8 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Import all the routers
 from routers.pv_socket import router as pv_socket_router
-from routers.camera_socket import router as camera_router  
-from routers.qs_console_socket import router as qs_console_router
+from routers.camera_socket import router as camera_socket_router  
+from routers.qs_console_socket import router as qs_console_socket_router
 from routers.core_api import router as core_api_router
 from routers.device_socket import router as device_socket_router
 
@@ -237,8 +237,8 @@ app.add_middleware(
 
 # Include all routers with appropriate prefixes and tags
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
-app.include_router(camera_router, prefix="/api/v1", tags=["Camera Streaming"])
-app.include_router(qs_console_router, prefix="/api/v1", tags=["Queue Server"])
+app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router)
 
@@ -248,30 +248,34 @@ def list_websockets():
     """List all available WebSocket endpoints with connection details"""
     return {
         "websockets": {
-            "pv_monitor": {
-                "endpoint": "/api/v1/ophydSocket",
-                "description": "Real-time EPICS PV monitoring and control",
-                "example_url": f"{BASE_WS_URL}/api/v1/ophydSocket",
+            "pv_socket": {
+                "endpoint": "/api/v1/pv-socket",
+                "description": "Real-time EPICS PV control and monitoring",
+                "example_url": f"{BASE_WS_URL}/api/v1/pv-socket",
+                "actions": ["subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set"],
+                "example_messages": {
+                    "subscribe_example": {"action": "subscribe", "pv": "IOC:m1"},
+                    "set_example": {"action": "set", "pv": "IOC:m1", "value": 10, "timeout": 1}
+                }
+            },
+            "device_socket": {
+                "endpoint": "/api/v1/device-socket",
+                "description": "Real-time ophyd device control and monitoring",
+                "example_url": f"{BASE_WS_URL}/api/v1/device-socket",
                 "actions": ["subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set"]
             },
-            "camera_stream": {
-                "endpoint": "/api/v1/pvcamera",
-                "description": "Live camera image streaming from area detectors",
-                "example_url": f"{BASE_WS_URL}/api/v1/pvcamera",
+            "camera_socket": {
+                "endpoint": "/api/v1/camera-socket",
+                "description": "Live image streaming from EPCIS area detectors",
+                "example_url": f"{BASE_WS_URL}/api/v1/camera-socket",
                 "format": "Base64 encoded JPEG images"
             },
-            "queue_server": {
-                "endpoint": "/api/v1/queue_server",
-                "description": "Queue server console communication via ZMQ",
-                "example_url": f"{BASE_WS_URL}/api/v1/queue_server",
+            "qs_console_socket": {
+                "endpoint": "/api/v1/qs-console-socket",
+                "description": "Queue server console output",
+                "example_url": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "protocol": "ZMQ bridge to WebSocket"
             },
-            "device_websocket": {
-                "endpoint": "/api/v1/devices",
-                "description": "Real-time ophyd device control and monitoring",
-                "example_url": f"{BASE_WS_URL}/api/v1/devices",
-                "type": "Echo WebSocket"
-            }
         },
         "connection_info": {
             "protocol": "WebSocket",
@@ -282,20 +286,6 @@ def list_websockets():
                 "WebSocket test clients",
                 "curl --include --no-buffer --header 'Connection: Upgrade' --header 'Upgrade: websocket'"
             ]
-        },
-        "usage_examples": {
-            "pv_subscribe": {
-                "action": "subscribe",
-                "pv": "IOC:m1",
-                "description": "Subscribe to PV updates"
-            },
-            "pv_set": {
-                "action": "set",
-                "pv": "IOC:m1",
-                "value": 10,
-                "timeout": 1,
-                "description": "Set PV value"
-            }
         }
     }
 
@@ -309,10 +299,10 @@ def read_root():
         "websocket_info": f"{BASE_HTTP_URL}/websockets",
         "endpoints": {
             "websockets": {
-                "pv_monitor": f"{BASE_WS_URL}/api/v1/ophydSocket",
-                "camera_stream": f"{BASE_WS_URL}/api/v1/pvcamera", 
-                "queue_server": f"{BASE_WS_URL}/api/v1/queue_server",
-                "device_websocket": f"{BASE_WS_URL}/api/v1/devices"
+                "pv_socket": f"{BASE_WS_URL}/api/v1/pv-socket",
+                "camera_socket": f"{BASE_WS_URL}/api/v1/camera-socket",
+                "qs_console_socket": f"{BASE_WS_URL}/api/v1/qs-console-socket",
+                "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },
             "rest_api": {
                 "devices": f"{BASE_HTTP_URL}/devices",

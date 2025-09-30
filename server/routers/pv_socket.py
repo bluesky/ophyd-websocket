@@ -7,7 +7,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, FastAPI
 
 router = APIRouter()
 
-@router.websocket("/ophydSocket")
+@router.websocket("/pv-socket")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
        
