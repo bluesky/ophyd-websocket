@@ -88,22 +88,37 @@ async def initialize_settings(websocket):
     try:
         data = await websocket.receive_text()
         message = json.loads(data)
+        
         settingsList = [
             {'name': 'startX', 'defaultPV': '13SIM1:cam1:MinX'},
             {'name': 'startY', 'defaultPV': '13SIM1:cam1:MinY'},
             {'name': 'sizeX', 'defaultPV': '13SIM1:cam1:SizeX'},
             {'name': 'sizeY', 'defaultPV': '13SIM1:cam1:SizeY'},
             {'name': 'colorMode', 'defaultPV': '13SIM1:cam1:ColorMode'},
-            {'name': 'dataType', 'defaultPV': '13SIM1:cam1:DataType'}
+            {'name': 'dataType', 'defaultPV': '13SIM1:cam1:DataType'},
+            {'name': 'binX', 'defaultPV': '13SIM1:cam1:BinX'},
+            {'name': 'binY', 'defaultPV': '13SIM1:cam1:BinY'}
         ]
-
-        imageArray_pv = message.get("imageArray_pv", "13SIM1:image1:ArrayData")
+        #print(message)
+        imageArray_pv = message.get("imageArray_PV", "13SIM1:image1:ArrayData")
         if len(imageArray_pv) == 0:
             imageArray_pv = "13SIM1:image1:ArrayData"
-        for item in settingsList:
-            item['pv'] = message.get(item['name'], item['defaultPV'])
-            if len(item['pv']) == 0:
-                item['pv'] = item['defaultPV']
+            print("Using Defaults for 13SIM1")
+            for item in settingsList:
+                item['pv'] = message.get(item['name'], item['defaultPV'])
+                if len(item['pv']) == 0:
+                    item['pv'] = item['defaultPV']
+        else:
+            #If user provides additional value for startX, startY, etc. then subscribe to those
+            #Otherwise if user only provides the imageArray_PV, concatenate the P to default suffixes
+            prefix = imageArray_pv.split(":")[0]
+            for item in settingsList:
+                suffix = ":" + item['defaultPV'].split(":")[1] + ":" + item['defaultPV'].split(":")[2]
+                #print(prefix+suffix)
+                item['pv'] = message.get(item['name'], prefix+suffix)
+                if len(item['pv']) == 0:
+                    item['pv'] = item['defaultPV']
+        
         return settingsList, imageArray_pv
     except Exception as e:
         await websocket.send_text(json.dumps({'error': str(e)}))
@@ -152,16 +167,42 @@ def update_dimensions(settingSignals, buffer):
     colorModeValue = settingSignals['colorMode'].get()
     dataTypeValue = settingSignals['dataType'].get()
     tempDimensions = {
-        'x': settingSignals['sizeX'].get() - settingSignals['startX'].get(),
-        'y': settingSignals['sizeY'].get() - settingSignals['startY'].get(),
+        # TO DO: test if this rounding function works to match up with the exact size of array data in bytes
+        'x': round((settingSignals['sizeX'].get() - settingSignals['startX'].get())/1),
+        'y': round((settingSignals['sizeY'].get() - settingSignals['startY'].get())/1),
+        #'x': round((settingSignals['sizeX'].get() - settingSignals['startX'].get())/settingSignals['binX'].get()),
+        #'y': round((settingSignals['sizeY'].get() - settingSignals['startY'].get())/settingSignals['binY'].get()),
         'colorMode': colorModeEnumList[colorModeValue],
         'dataType': dataTypeEnumList[dataTypeValue]
     }
+    print(tempDimensions)
     buffer.put_nowait((None, time.time(), tempDimensions))
+use_log_normalization = True  # Default to True
 
 # Main loop for streaming images
 async def handle_streaming(websocket, buffer):
+    global use_log_normalization  # Use the global variable to toggle normalization
     try:
+
+        # Start a background task to listen for client messages
+        async def listen_for_client_messages():
+            global use_log_normalization
+            while True:
+                try:
+                    message = await websocket.receive_text()
+                    data = json.loads(message)
+                    if "toggleLogNormalization" in data:
+                        use_log_normalization = data["toggleLogNormalization"]
+                        print(f"Log normalization toggled to: {use_log_normalization}")
+                        await websocket.send_text(json.dumps({"logNormalization": use_log_normalization}))
+                except WebSocketDisconnect:
+                    break
+                except Exception as e:
+                    print(f"Error processing client message: {e}")
+
+        # Run the listener in the background
+        asyncio.create_task(listen_for_client_messages())
+
         while True:
             rawImageArray, timestamp, updatedSettings = await buffer.get()
 
@@ -183,11 +224,34 @@ async def handle_streaming(websocket, buffer):
         await websocket.close()
 
 def normalize_array_data(array_data, dataType):
-    if dataType not in ['UInt8', 'Int8']:
+    global use_log_normalization
+    if not use_log_normalization:
         max_val = array_data.max() if array_data.max() > 0 else 1
-        array_data = (array_data / max_val * 255).astype(np.uint8)
-    return array_data
+        return (array_data / max_val * 255).astype(np.uint8)
+    else:
+        return log_normalize_to_255(array_data)
 
+
+def log_normalize_to_255(data: np.ndarray) -> np.ndarray:
+
+    if np.any(data < 0):
+        raise ValueError("Input data must be non-negative for log normalization.")
+
+    # Avoid log(0) by shifting
+    data = data + 1.0
+
+    # Apply logarithm
+    log_data = np.log(data)
+
+    # Normalize to 0–255
+    log_min = np.min(log_data)
+    log_max = np.max(log_data)
+    if log_max == log_min:
+        normalized = np.zeros_like(log_data)
+    else:
+        normalized = (log_data - log_min) / (log_max - log_min) * 255
+
+    return normalized.astype(np.uint8)
 def reshape_array(array_data, height, width, colorMode):
     if colorMode == 'Mono':
         reshaped_data = array_data.reshape((height, width))
