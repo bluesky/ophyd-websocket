@@ -1,5 +1,5 @@
 # ophyd-websocket
-Experimental python based websocket server used to live-monitor and set ophyd device values through a web browser. Please use branch feature/oas for the most recent updates.
+Experimental python based websocket server used to live-monitor and set ophyd device values through a web browser. Use branch feature/oas for the most recent updates.
 
 ## Use Case 
 If you are building a web browser application and need to:
@@ -53,6 +53,13 @@ OAS_PORT=8001 OAS_HOST=0.0.0.0 python server/server.py
 Any use of the device-socket path will require the server to start with a startup directory, followed by a POST request to instantiate the device registry.
 ```bash
 python server/server.py --startup-dir /path/to/devices.py
+```
+
+```python
+#devices.py
+
+from ophyd import EpicsSignal
+mono = EpicsSignal("bl531_xps1:mono_angle_deg", name="mono") #any ophyd device will be recognized and added to the device registry
 ```
 
 Then make a POST request to /api/v1/load-devices which will load up the --startup-dir file(s).
@@ -114,7 +121,7 @@ Responses from server over websocket:
 }
 ```
 
-JSON message client to /api/v1/pv-socket
+JSON message client to /api/v1/device-socket
 ```bash
 #JSON Message from client to /api/v1/device-socket
 {
@@ -140,11 +147,11 @@ Responses from server over websocket:
 # Messages and Responses
 ```mermaid
 sequenceDiagram
-        Browser<<-->>Ophyd-Websocket: Connect
+        Browser<<-->>Ophyd-Websocket: Connect /device-socket
         Browser->>Ophyd-Websocket: Subscribe mono
         activate Ophyd-Websocket
         Ophyd-Websocket->>Control-System: Subscribe mono
-        EPICS<<-->>Ophyd-Websocket: mono Updates
+        Control-System<<-->>Ophyd-Websocket: mono Updates
         Ophyd-Websocket->>Browser: mono metadata
         Ophyd-Websocket->>Browser: mono current value
         deactivate Ophyd-Websocket
@@ -156,7 +163,7 @@ sequenceDiagram
 ```
 
 # Using pv-socket for EPICS pvs
-The /pv-socket path can be used for subscribing to an EPICS PV through Ophyd. This method does not require any configuration files or startup directory. When using this method, it is recommended to always subscribe to the EPICS readback value for any PV that is meant to show live updates.
+In addition to subscribing to pre-instantiated ophyd devices, another path (/pv-socket) allows a client to send a message that is used to dynamically instantiate an ophyd device and add callbacks. This particular path only works for EPICS devices, but the same general strategy can be implemented for any other control system or ophyd class. The /pv-socket path accepts an EPICS PV and uses EpicsSignal to create an ophyd device. When using this method, it is recommended to always subscribe to the EPICS readback value for any PV that is meant to show live updates.
 
 ## Example - Subscribing to a pv
 Example JSON message to ws://localhost:8000/api/v1/pv-socket
@@ -234,7 +241,7 @@ Responses from server over websocket:
 # Messages and Responses
 ```mermaid
 sequenceDiagram
-        Browser<<-->>Ophyd-Websocket: Connect
+        Browser<<-->>Ophyd-Websocket: Connect /pv-socket
         Browser->>Ophyd-Websocket: Subscribe DMC01
         activate Ophyd-Websocket
         Ophyd-Websocket->>EPICS: Subscribe DMC01
@@ -250,7 +257,7 @@ sequenceDiagram
 ```
 
 # Experimental Features
-In addition to subscribing to PVs, where you must provide the exact PV name, you can also subscribe to devices, stream area detector images, and stream queue server console output from this server. These features are experimental and not intended for to be stable.
+In addition to subscribing to PVs, where you must provide the exact PV name, you can also subscribe to devices, stream area detector images, and stream queue server console output from this server. These features are experimental.
 
 ## "Ophyd as a Service" REST API
 After starting the server navigate to [http://localhost:8001/docs](http://localhost:8001/docs) to see endpoints and try out functionality. 
@@ -258,27 +265,6 @@ After starting the server navigate to [http://localhost:8001/docs](http://localh
 You can load up predefined Ophyd devices with a POST request to `http://localhost:8001/api/v1/load-devices`.
 
 These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
-
-```bash
-python server/server.py --startup-dir /path/to/devices.py
-```
-Then in your python file instantiate your Ophyd devices, which will then be available when making API calls or websocket subscriptions to devices.
-
-```python
-#/path/to/devices.py
-from ophyd import EpicsSignal, EpicsMotor, Device, Component
-
-# Simple EPICS signals - these will be detected and added to registry
-sim_motor1 = EpicsSignal("IOC:m1", name="motor1")
-sim_motor2 = EpicsMotor("IOC:m2", name="motor2")
-# Custom Ophyd Device class
-class SimpleMotor(Device):
-    """A simple motor device with position and velocity"""
-    m1 = Component(EpicsSignal, "m1")
-    m2 = Component(EpicsSignal, "m2")
-
-sim_motor_device = SimpleMotor("IOC:", name="sim_motor_device")
-```
 
 
 ## Stream Queue Server Console Output
