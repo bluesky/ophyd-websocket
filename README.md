@@ -360,7 +360,7 @@ sequenceDiagram
 ```
 
 # Experimental Features
-In addition to subscribing to PVs, where you must provide the exact PV name, you can also subscribe to devices, stream area detector images, and stream queue server console output from this server. These features are experimental and not intended for to be stable.
+In addition to subscribing to devices and setting their values, there are some additional experimental websockets and REST API endpoints available in this project.
 
 ## "Ophyd as a Service" REST API
 After starting the server navigate to [http://localhost:8001/docs](http://localhost:8001/docs) to see endpoints and try out functionality. 
@@ -441,10 +441,246 @@ sim_motor_device = SimpleMotor("IOC:", name="sim_motor_device")
 
 
 ## Stream Queue Server Console Output
-Socket Endpoint: /api/v1/qs-console-socket
+
+**Socket Endpoint:** `/api/v1/qs-console-socket`
+
+The Queue Server Console Output WebSocket provides real-time streaming of console output from the Bluesky Queue Server. This is useful for monitoring queue server operations, plan execution status, and debugging queue server issues.
+
+### How It Works
+
+The WebSocket endpoint acts as a bridge between the Queue Server's ZeroMQ (ZMQ) console output and WebSocket clients. It:
+
+1. **Connects to Queue Server ZMQ**: Establishes a ZMQ SUB (subscriber) socket connection to the queue server's console output stream
+2. **Filters Messages**: Receives all console messages and filters out internal "QS_Console" heartbeat messages
+3. **Streams to Clients**: Forwards relevant console output to connected WebSocket clients in real-time
+
+### Configuration
+
+The connection to the Queue Server is configured via environment variables:
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `ZMQ_HOST` | `localhost` | Hostname where the Queue Server ZMQ console is running |
+| `ZMQ_PORT` | `60625` | Port for the Queue Server ZMQ console output |
+
+### Usage Example
+Javascript Client
+```javascript
+// Connect to the queue server console stream
+const ws = new WebSocket('ws://localhost:8001/api/v1/qs-console-socket');
+
+ws.onopen = function() {
+    console.log('Connected to Queue Server console');
+};
+
+ws.onmessage = function(event) {
+    // Real-time console output from the queue server
+    console.log('Queue Server:', event.data);
+    
+    // Display in your application's console/log area
+    document.getElementById('console-output').innerHTML += event.data + '\n';
+};
+
+ws.onclose = function() {
+    console.log('Queue Server console connection closed');
+};
+```
+
+### What You'll See
+
+The console output includes various types of messages from the queue server:
+
+- **Plan Execution**: Start/stop/pause/resume notifications
+- **Device Status**: Motor movements, detector readings
+- **Error Messages**: Plan failures, device connection issues
+- **Queue Status**: Items added/removed from the queue
+- **User Commands**: RE manager commands and responses
+
+### Example Console Output
+
+```
+2024-02-06 10:30:15 - INFO - Queue Server: Starting plan 'count'...
+2024-02-06 10:30:16 - INFO - Queue Server: Moving motor 'x_motor' to position 5.0
+2024-02-06 10:30:17 - INFO - Queue Server: Detector 'det1' reading: 1234.56
+2024-02-06 10:30:18 - INFO - Queue Server: Plan 'count' completed successfully
+2024-02-06 10:30:19 - INFO - Queue Server: Queue empty
+```
+
+### Troubleshooting
+
+**Connection Issues:**
+- Verify `ZMQ_HOST` and `ZMQ_PORT` environment variables
+- Check that the Queue Server is running and ZMQ console is enabled
+- Ensure firewall allows connections to the ZMQ port
+
+**No Messages Received:**
+- Queue Server may be idle (no plans running)
+- Check Queue Server configuration for console output settings
+- Verify ZMQ console is properly configured in the Queue Server with `start-re-manager --zmq-publish-console ON`
 
 ## Stream Area Detector Images
-Socket Endpoint: /api/v1/camera-socket
+
+**Socket Endpoint:** `/api/v1/camera-socket`
+
+The Camera Socket WebSocket provides real-time streaming of images from EPICS Area Detector devices. It converts raw detector array data into JPEG images and streams them to web clients for live visualization.
+
+### How It Works
+
+The WebSocket endpoint:
+
+1. **Connects to Area Detector PVs**: Subscribes to image array data and detector settings (size, color mode, data type)
+2. **Processes Raw Data**: Converts EPICS array data into proper image formats with normalization
+3. **Streams JPEG Images**: Encodes processed images as JPEG and sends binary data to WebSocket clients
+4. **Dynamic Configuration**: Automatically adjusts to detector settings changes (image dimensions, data types)
+
+### Configuration
+
+The camera socket requires configuration of Area Detector PVs on connection. You can provide:
+
+- **Image Array PV**: The main PV containing image data (e.g., `IOC:image1:ArrayData`)
+- **Settings PVs**: Individual PVs for image dimensions and properties
+- **Prefix**: A common prefix to auto-generate PV names
+
+### Connection Message
+
+Send an initialization message when connecting to specify the detector configuration:
+
+```javascript
+{
+    "imageArray_PV": "13SIM1:image1:ArrayData",  // Main image data PV
+    "startX": "13SIM1:cam1:MinX",                // Image region start X
+    "startY": "13SIM1:cam1:MinY",                // Image region start Y  
+    "sizeX": "13SIM1:cam1:SizeX",                // Image width
+    "sizeY": "13SIM1:cam1:SizeY",                // Image height
+    "colorMode": "13SIM1:cam1:ColorMode",        // Color mode (Mono, RGB1, RGB2, RGB3)
+    "dataType": "13SIM1:cam1:DataType"           // Data type (UInt8, UInt16, etc.)
+}
+```
+
+### Usage Example
+
+```javascript
+// Connect to the camera stream
+const ws = new WebSocket('ws://localhost:8001/api/v1/camera-socket');
+
+// Create canvas for image display
+const canvas = document.getElementById('camera-canvas');
+const context = canvas.getContext('2d');
+
+ws.onopen = function() {
+    console.log('Connected to camera stream');
+    
+    // Send configuration for Area Detector
+    const config = {
+        imageArray_PV: "13SIM1:image1:ArrayData",
+        startX: "13SIM1:cam1:MinX",
+        startY: "13SIM1:cam1:MinY", 
+        sizeX: "13SIM1:cam1:SizeX",
+        sizeY: "13SIM1:cam1:SizeY",
+        colorMode: "13SIM1:cam1:ColorMode",
+        dataType: "13SIM1:cam1:DataType"
+    };
+    ws.send(JSON.stringify(config));
+};
+
+ws.onmessage = async function(event) {
+    if (typeof event.data === "string") {
+        // Configuration/settings updates
+        const settings = JSON.parse(event.data);
+        console.log('Camera settings:', settings);
+        
+        // Update canvas size if needed
+        if (settings.x && settings.y) {
+            canvas.width = settings.x;
+            canvas.height = settings.y;
+        }
+    } else {
+        // Binary image data (JPEG)
+        try {
+            //NOTE: there are many ways to display an image in the browser, this is just one example
+            const blob = new Blob([event.data], { type: 'image/jpeg' });
+            const imageBitmap = await createImageBitmap(blob);
+            
+            // Draw image to canvas
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(imageBitmap, 0, 0, canvas.width, canvas.height);
+        } catch (error) {
+            console.error('Error displaying image:', error);
+        }
+    }
+};
+
+// Optional: Toggle logarithmic normalization
+function toggleLogNormalization(enabled) {
+    const message = { toggleLogNormalization: enabled };
+    ws.send(JSON.stringify(message));
+}
+
+ws.onclose = function() {
+    console.log('Camera stream connection closed');
+};
+```
+
+### Message Types
+
+#### Outgoing (Client → Server)
+
+**Initial Configuration:**
+```javascript
+{
+    "imageArray_PV": "IOC:image1:ArrayData",
+    "sizeX": "IOC:cam1:SizeX",
+    "sizeY": "IOC:cam1:SizeY",
+    // ... other detector PVs
+}
+```
+
+**Toggle Log Normalization:**
+```javascript
+{
+    "toggleLogNormalization": true  // or false
+}
+```
+
+#### Incoming (Server → Client)
+
+**Image Settings Updates (JSON):**
+```javascript
+{
+    "x": 1024,              // Image width
+    "y": 768,               // Image height
+    "colorMode": "Mono",    // Color mode
+    "dataType": "UInt16"    // Data type
+}
+```
+
+**Log Normalization Status:**
+```javascript
+{
+    "logNormalization": true
+}
+```
+
+**Image Data (Binary):** Raw JPEG binary data for display
+
+### Features
+
+- **Multiple Color Modes**: Supports Mono, RGB1, RGB2, RGB3 formats
+- **Data Type Flexibility**: Handles various detector data types (UInt8, UInt16, Int32, Float32, etc.)
+- **Normalization Options**: Linear or logarithmic intensity normalization
+- **Real-time Settings**: Responds to detector configuration changes automatically
+
+### Default Configuration
+
+If no configuration is provided, defaults to ADSimDetector PVs:
+- Image Array: `13SIM1:image1:ArrayData`
+- Camera Settings: `13SIM1:cam1:*` PVs
+
+### Tips
+
+If using this for a GigE camera (or other non-detector camera used to live stream) it is recommended to enable binning on the EPICS device to lower the processing demands.
+
+This socket is not recommended for use with true Xray detectors, as the large array sizes can have performance issues when being processed on the client side. If you need to display the most recent detector image, consider instead loading up the saved detector file once it's available. Examples of this are available in finch.
 
 # Docker setup
 ```bash
