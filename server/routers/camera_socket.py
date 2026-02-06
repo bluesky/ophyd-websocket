@@ -4,11 +4,15 @@ import time
 import numpy as np
 import io
 import base64
+import logging
 from PIL import Image
 
 from ophyd import EpicsSignalRO
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 #from fastapi.testclient import TestClient
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 dtype_map = {
     'Int8': np.int8,
@@ -23,9 +27,23 @@ dtype_map = {
     'Float64': np.float64 
 }
 
-colorModeEnumList = ['Mono', 'RGB1', 'RGB2', 'RGB3']
-dataTypeEnumList = ['Int8', 'UInt8', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64', 'Float32', 'Float64']
-max_dimension = 2500 #maximum pixel width or height to be sent out. Increase if higher fidelity is needed
+color_mode_enum_list = ['Mono', 'RGB1', 'RGB2', 'RGB3']
+data_type_enum_list = ['Int8', 'UInt8', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64', 'Float32', 'Float64']
+max_dimension = 2500 #maximum pixel width or height to be sent out. TO DO set this with env var or client message through socket
+use_log_normalization = True #default that can be changed by client message through socket
+
+#Defaults correspond to the pvs from ADSimDetector, often the first detector to be tested with new EPICS installations. Allows user to connect to websocket with no args
+default_settings_list = [
+    {'name': 'startX', 'defaultPV': '13SIM1:cam1:MinX'},
+    {'name': 'startY', 'defaultPV': '13SIM1:cam1:MinY'},
+    {'name': 'sizeX', 'defaultPV': '13SIM1:cam1:SizeX'},
+    {'name': 'sizeY', 'defaultPV': '13SIM1:cam1:SizeY'},
+    {'name': 'colorMode', 'defaultPV': '13SIM1:cam1:ColorMode'},
+    {'name': 'dataType', 'defaultPV': '13SIM1:cam1:DataType'},
+    {'name': 'binX', 'defaultPV': '13SIM1:cam1:BinX'},
+    {'name': 'binY', 'defaultPV': '13SIM1:cam1:BinY'}
+]
+default_image_array_pv = "13SIM1:image1:ArrayData"
 
 
 
@@ -37,17 +55,17 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
     buffer = asyncio.Queue(maxsize=1000)
-    settingsList, imageArray_pv = await initialize_settings(websocket)
-
-    settingSignals = await setup_signals(settingsList, websocket)
+    settings_list, image_array_pv = await initialize_settings(websocket)
+    logger.debug(f"Initialized settings list: {settings_list}, image array PV: {image_array_pv}")
+    settingSignals = await setup_signals(settings_list, websocket)
     if settingSignals == False:
         return
-    if not await check_connections(settingSignals, websocket):
+    if not await check_settings_connections(settingSignals, websocket):
         return
 
     # Reassign the updated enum lists
-    global colorModeEnumList, dataTypeEnumList
-    colorModeEnumList, dataTypeEnumList = update_enum_lists(settingSignals, colorModeEnumList, dataTypeEnumList)
+    global color_mode_enum_list, data_type_enum_list
+    color_mode_enum_list, data_type_enum_list = update_enum_lists(settingSignals, color_mode_enum_list, data_type_enum_list)
 
     def array_cb(value, timestamp, **kwargs):
         if buffer.qsize() >= buffer.maxsize:
@@ -55,7 +73,7 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         try:
             buffer.put_nowait((value, timestamp, False))
         except asyncio.QueueFull:
-            print("Buffer full, dropping frame")
+            logger.warning("Buffer full, dropping frame")
 
     def settings_cb(value, timestamp, **kwargs):
         update_dimensions(settingSignals, buffer)
@@ -65,14 +83,14 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         settingSignals[key].subscribe(settings_cb)
 
     try:
-        array_signal = EpicsSignalRO(imageArray_pv, name='array_signal')
+        array_signal = EpicsSignalRO(image_array_pv, name='array_signal')
         array_signal.get()
     except Exception as e:
         await websocket.send_text(json.dumps({'error': str(e)}))
         await websocket.close()
         return
 
-    if not await check_signal_connection(array_signal, imageArray_pv, websocket):
+    if not await check_array_connection(array_signal, image_array_pv, websocket):
         return
     array_signal.subscribe(array_cb)
 
@@ -88,96 +106,85 @@ async def initialize_settings(websocket):
     try:
         data = await websocket.receive_text()
         message = json.loads(data)
-        
-        settingsList = [
-            {'name': 'startX', 'defaultPV': '13SIM1:cam1:MinX'},
-            {'name': 'startY', 'defaultPV': '13SIM1:cam1:MinY'},
-            {'name': 'sizeX', 'defaultPV': '13SIM1:cam1:SizeX'},
-            {'name': 'sizeY', 'defaultPV': '13SIM1:cam1:SizeY'},
-            {'name': 'colorMode', 'defaultPV': '13SIM1:cam1:ColorMode'},
-            {'name': 'dataType', 'defaultPV': '13SIM1:cam1:DataType'},
-            {'name': 'binX', 'defaultPV': '13SIM1:cam1:BinX'},
-            {'name': 'binY', 'defaultPV': '13SIM1:cam1:BinY'}
-        ]
-        #print(message)
-        imageArray_pv = message.get("imageArray_PV", "13SIM1:image1:ArrayData")
-        if len(imageArray_pv) == 0:
-            imageArray_pv = "13SIM1:image1:ArrayData"
-            print("Using Defaults for 13SIM1")
-            for item in settingsList:
+        logger.info(f"Received initialization message: {message}")
+        settings_list = default_settings_list.copy()
+        image_array_pv = message.get("imageArray_PV", default_image_array_pv)
+        if len(image_array_pv) == 0:
+            image_array_pv = default_image_array_pv
+            logger.info("Using Defaults for 13SIM1")
+            for item in settings_list:
                 item['pv'] = message.get(item['name'], item['defaultPV'])
                 if len(item['pv']) == 0:
                     item['pv'] = item['defaultPV']
         else:
             #If user provides additional value for startX, startY, etc. then subscribe to those
-            #Otherwise if user only provides the imageArray_PV, concatenate the P to default suffixes
-            prefix = imageArray_pv.split(":")[0]
-            for item in settingsList:
+            #Otherwise if user only provides the imageArray_PV, concatenate the Prefix to default suffixes
+            prefix = image_array_pv.split(":")[0]
+            for item in settings_list:
                 suffix = ":" + item['defaultPV'].split(":")[1] + ":" + item['defaultPV'].split(":")[2]
-                #print(prefix+suffix)
+                logger.debug(f"Using PV: {prefix}{suffix}")
                 item['pv'] = message.get(item['name'], prefix+suffix)
                 if len(item['pv']) == 0:
                     item['pv'] = item['defaultPV']
-        
-        return settingsList, imageArray_pv
+        return settings_list, image_array_pv
     except Exception as e:
         await websocket.send_text(json.dumps({'error': str(e)}))
         await websocket.close()
         return None, None
 
-async def setup_signals(settingsList, websocket):
+async def setup_signals(settings_list, websocket):
     settingSignals = {}
     try:
-        for item in settingsList:
+        for item in settings_list:
             signal = EpicsSignalRO(item['pv'], name=item['name'])
             signal.get()
             settingSignals[item['name']] = signal
     except Exception as e:
+        logger.error(f"Error setting up signals: {e}")
         await websocket.send_text(json.dumps({'error': str(e)}))
         await websocket.close()
         return False
     return settingSignals
 
-async def check_connections(settingSignals, websocket):
+async def check_settings_connections(settingSignals, websocket):
     for key, signal in settingSignals.items():
         if not signal.connected:
-            print('setting PV ' + key + ' not connected')
+            logger.error(f"Setting PV {key} not connected")
             await websocket.send_text(json.dumps({'error': f"{key} pv could not connect"}))
             await websocket.close()
             return False
     return True
 
-async def check_signal_connection(signal, name, websocket):
+async def check_array_connection(signal, name, websocket):
     if not signal.connected:
-        print('array data pv not connected, exiting')
+        logger.error(f"Array data PV not connected, exiting")
         await websocket.send_text(json.dumps({'error': f"The {name} pv could not connect"}))
         await websocket.close()
         return False
     return True
 
-def update_enum_lists(settingSignals, colorModeEnumList, dataTypeEnumList):
+def update_enum_lists(settingSignals, color_mode_enum_list, data_type_enum_list):
     #ColorMode and DataType should have an enum_strs attribute containing an array of
     #strings whose index corresponds to the value held by the pv
     #Overwrite the defaults with the actual values, if values don't exist than accept default
-    colorModeEnumList = getattr(settingSignals['colorMode'], 'enum_strs', colorModeEnumList)
-    dataTypeEnumList = getattr(settingSignals['dataType'], 'enum_strs', dataTypeEnumList)
-    return colorModeEnumList, dataTypeEnumList
+    color_mode_enum_list = getattr(settingSignals['colorMode'], 'enum_strs', color_mode_enum_list)
+    data_type_enum_list = getattr(settingSignals['dataType'], 'enum_strs', data_type_enum_list)
+    return color_mode_enum_list, data_type_enum_list
 
 def update_dimensions(settingSignals, buffer):
-    colorModeValue = settingSignals['colorMode'].get()
-    dataTypeValue = settingSignals['dataType'].get()
+    color_mode_value = settingSignals['colorMode'].get()
+    data_type_value = settingSignals['dataType'].get()
     tempDimensions = {
         # TO DO: test if this rounding function works to match up with the exact size of array data in bytes
         'x': round((settingSignals['sizeX'].get() - settingSignals['startX'].get())/1),
         'y': round((settingSignals['sizeY'].get() - settingSignals['startY'].get())/1),
         #'x': round((settingSignals['sizeX'].get() - settingSignals['startX'].get())/settingSignals['binX'].get()),
         #'y': round((settingSignals['sizeY'].get() - settingSignals['startY'].get())/settingSignals['binY'].get()),
-        'colorMode': colorModeEnumList[colorModeValue],
-        'dataType': dataTypeEnumList[dataTypeValue]
+        'colorMode': color_mode_enum_list[color_mode_value],
+        'dataType': data_type_enum_list[data_type_value]
     }
-    print(tempDimensions)
+    logger.debug(f"Updated image dimensions: {tempDimensions}")
     buffer.put_nowait((None, time.time(), tempDimensions))
-use_log_normalization = True  # Default to True
 
 # Main loop for streaming images
 async def handle_streaming(websocket, buffer):
@@ -193,12 +200,12 @@ async def handle_streaming(websocket, buffer):
                     data = json.loads(message)
                     if "toggleLogNormalization" in data:
                         use_log_normalization = data["toggleLogNormalization"]
-                        print(f"Log normalization toggled to: {use_log_normalization}")
+                        logger.info(f"Log normalization toggled to: {use_log_normalization}")
                         await websocket.send_text(json.dumps({"logNormalization": use_log_normalization}))
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
-                    print(f"Error processing client message: {e}")
+                    logger.error(f"Error processing client message: {e}")
 
         # Run the listener in the background
         asyncio.create_task(listen_for_client_messages())
@@ -215,7 +222,7 @@ async def handle_streaming(websocket, buffer):
 
             bufferedResult = await asyncio.to_thread(get_buffer, rawImageArray, height, width, colorMode, dataType)
             if isinstance(bufferedResult, Exception):
-                print('Skipping image due to error')
+                logger.warning('Skipping image due to error')
                 continue
             else:
                 await websocket.send_bytes(bufferedResult.getvalue())
@@ -233,10 +240,9 @@ def normalize_array_data(array_data, dataType):
 
 
 def log_normalize_to_255(data: np.ndarray) -> np.ndarray:
-
     if np.any(data < 0):
         raise ValueError("Input data must be non-negative for log normalization.")
-
+    
     # Avoid log(0) by shifting
     data = data + 1.0
 
@@ -252,6 +258,7 @@ def log_normalize_to_255(data: np.ndarray) -> np.ndarray:
         normalized = (log_data - log_min) / (log_max - log_min) * 255
 
     return normalized.astype(np.uint8)
+
 def reshape_array(array_data, height, width, colorMode):
     if colorMode == 'Mono':
         reshaped_data = array_data.reshape((height, width))
@@ -284,7 +291,7 @@ def get_buffer(rawImageArray, height, width, colorMode, dataType):
         array_data = normalize_array_data(array_data, dataType)
         array_data, mode = reshape_array(array_data, height, width, colorMode)
     except Exception as e:
-        print(f"Error Formatting array data: {e}")
+        logger.error(f"Error formatting array data: {e}")
         return e
 
     try:
@@ -297,5 +304,5 @@ def get_buffer(rawImageArray, height, width, colorMode, dataType):
         img.save(buffered, format="JPEG", quality=100)
         return buffered
     except Exception as e:
-        print(f"Error creating image buffer: {e}")
+        logger.error(f"Error creating image buffer: {e}")
         return e
