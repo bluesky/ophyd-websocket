@@ -2,6 +2,7 @@ import asyncio
 import json
 import numpy as np
 from ophyd import EpicsSignalRO, EpicsSignal, Device, EpicsMotor
+from ophyd.pseudopos import PseudoPositioner
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from utils.device_registry import device_registry
 import time
@@ -21,6 +22,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # different ophyd devices may have different event types that are subscribable
         # EpicsSignal: 'setpoint_meta', 'setpoint', 'meta', 'value'
         # EpicsMotor: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done'
+        # PseudoPositioner: 'start_moving', 'readback', '_req_done', 'done_moving', 'acq_done', 'readback'
         # Component: 'acq_done'
         connection_state = {"connected": None, "last_update": 0}
 
@@ -61,13 +63,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     if len(cleaned_array) > 0:
                         string_value = ''.join(chr(x) for x in cleaned_array)
                         value = string_value
+                        print(value)
                 except (ValueError, OverflowError):
                     # If conversion fails, keep original value
                     pass
-            # Runs only when the value changes, not when the device disconnects OR reconnects
-            #print(device_name, value, type(value))
+            if isinstance(value, tuple):
+                value = value[0]
             message = {key: value for key, value in kwargs.items()}
-            #print(message)
             message = {
                         "device": device_name,
                         "value": value,
@@ -90,6 +92,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 device.subscribe(callbackValue, event_type='readback')
                 for signal in device.walk_signals():
                     signal.item.subscribe(callbackMd, event_type='meta')
+            elif isinstance(device, PseudoPositioner):
+                device.subscribe(callbackValue, event_type='readback')
             else:
                 for name in device.component_names:
                     recursively_subscribe(getattr(device, name))
@@ -168,9 +172,10 @@ async def websocket_endpoint(websocket: WebSocket):
             return
         
         device = subscriptions.get(device_name)
-        if device.write_access == False:
-            await websocket.send_json({"error": f"Write access is not enabled for device {device_name}. Cannot set value."})
-            return
+        #if device.write_access == False:
+        #temporary workaround until we get a better way to know if a device should be writable, writable devices still showing null write_access
+        #     await websocket.send_json({"error": f"Write access is not enabled for device {device_name}. Cannot set value."})
+        #     return
         
         value = data.get("value")
         try:
@@ -188,7 +193,8 @@ async def websocket_endpoint(websocket: WebSocket):
         if not isinstance(timeout, (int, float)):
             await websocket.send_json({"error": f"Timeout must be a number. Could not set value of {device_name} to {value}"})
             return
-        if isinstance(value, (int, float)):
+        
+        if not isinstance(device, PseudoPositioner) and isinstance(value, (int, float)):
             low_limit = device.low_limit
             high_limit = device.high_limit
         
