@@ -1,11 +1,15 @@
 import asyncio
 import json
 import numpy as np
+import logging
 from ophyd import EpicsSignalRO, EpicsSignal, Device, EpicsMotor
 from ophyd.pseudopos import PseudoPositioner
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from utils.device_registry import device_registry
 import time
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -46,14 +50,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
                         except WebSocketDisconnect:
-                            print(f"Connection closed while sending update for device: {device_name}")
+                            logger.info(f"Connection closed while sending update for device: {device_name}")
                     if current_connection == True:
                         # TODO: verify that the all signals in device are connected before sending connected=true message
                         #device.connected
                         try:
                             asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
                         except WebSocketDisconnect:
-                            print(f"Connection closed while sending update for device: {device_name}")
+                            logger.info(f"Connection closed while sending update for device: {device_name}")
 
         def callbackValue(value, timestamp, **kwargs):
             if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
@@ -63,7 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if len(cleaned_array) > 0:
                         string_value = ''.join(chr(x) for x in cleaned_array)
                         value = string_value
-                        print(value)
+                        logger.debug(f"Converted array to string for device {device_name}: {value}")
                 except (ValueError, OverflowError):
                     # If conversion fails, keep original value
                     pass
@@ -82,7 +86,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
-                print(f"Connection closed while sending update for device: {device_name}")
+                logger.info(f"Connection closed while sending update for device: {device_name}")
 
         def recursively_subscribe(device, name=None, parent=None):
             if isinstance(device, (EpicsSignal, EpicsSignalRO)):
@@ -259,9 +263,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             except json.JSONDecodeError:
                 await websocket.send_json({"error": "Invalid JSON format"})
+                logger.error(f"Received invalid JSON: {message}")
             except Exception as e:
                 await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
+                logger.error(f"Unexpected error: {str(e)}")
     except Exception as e:
-        print(f"Error in websocket loop: {str(e)}")
+        logger.error(f"Error in websocket loop: {str(e)}")
     finally:
-        print("WebSocket connection closed.")
+        logger.info("WebSocket connection closed.")
