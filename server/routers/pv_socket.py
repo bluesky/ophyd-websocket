@@ -2,8 +2,11 @@ import asyncio
 import json
 import numpy as np
 import uvicorn
+import logging
 from ophyd import EpicsSignalRO, EpicsSignal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, FastAPI
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -28,7 +31,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
-                print(f"Connection closed while sending update for PV: {pv_name}")
+                logger.info(f"Connection closed while sending update for PV: {pv_name}")
 
         def callbackValue(value, timestamp, **kwargs):
             if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
@@ -42,7 +45,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # If conversion fails, keep original value
                     pass
             # Runs only when the value changes, not when the signal disconnects OR reconnects
-            #print(pv_name, value, type(value))
+            logger.debug(f"PV value update: {pv_name} = {value} (type: {type(value)})")
             message = {
                         "pv": pv_name,
                         "value": value,
@@ -54,8 +57,8 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except WebSocketDisconnect:
-                print(f"Connection closed while sending update for PV: {pv_name}")
-        
+                logger.info(f"Connection closed while sending update for PV: {pv_name}")
+
         signal.subscribe(callbackMd, event_type='meta')
         signal.subscribe(callbackValue, event_type='value')
         subscriptions[pv_name] = signal
@@ -104,8 +107,7 @@ async def websocket_endpoint(websocket: WebSocket):
         return
 
     async def handleRefresh():
-        for pv_name, signal in subscriptions.items():
-            #signal.get()
+        for pv_name in subscriptions.items():
             subscriptions[pv_name].get()
         await websocket.send_json({"message": "Refreshed all PVs"})
         return
@@ -166,14 +168,16 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive_text()
             try:
                 data = json.loads(message)
+                logger.debug(f"Received message: {data}")
                 action = data.get("action")
                 if (action != "subscribe" and action != "unsubscribe" and action != "refresh" and action != "subscribeSafely" and action != "subscribeReadOnly" and action != "set"):
                     await websocket.send_json({
-                            "error": (
-                                f"Received action: {action}, actions must be 'subscribe', 'unsubscribe', 'refresh', 'subscribeSafely', 'subscribeReadOnly', or 'set'. "
-                                "Example msg: {action: 'subscribe', pv: 'IOC:m1'}"
-                            )
+                        "error": (
+                            f"Received action: {action}, actions must be 'subscribe', 'unsubscribe', 'refresh', 'subscribeSafely', 'subscribeReadOnly', or 'set'. "
+                            "Example msg: {action: 'subscribe', pv: 'IOC:m1'}"
+                        )
                     })
+                    logger.error(f"Received invalid action: {action}")
                     continue
 
                 if action == "subscribe":
@@ -202,9 +206,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             except json.JSONDecodeError:
                 await websocket.send_json({"error": "Invalid JSON format"})
+                logger.error(f"Received invalid JSON: {message}")
             except Exception as e:
                 await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
+                logger.error(f"Unexpected error: {str(e)}")
     except Exception as e:
-        print(f"Error in websocket loop: {str(e)}")
+        logger.error(f"Error in websocket loop: {str(e)}")
     finally:
-        print("WebSocket connection closed.")
+        logger.info("WebSocket connection closed.")
