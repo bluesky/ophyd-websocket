@@ -4,11 +4,16 @@ Test WebSocket endpoints for the ophyd WebSocket server.
 
 import sys
 import pytest
+import warnings
 from pathlib import Path
 from fastapi.testclient import TestClient
 
 # Skip if dependencies not available
 pytest.importorskip("websockets")
+
+# Filter out expected WebSocket coroutine warnings for cleaner test output
+warnings.filterwarnings("ignore", message="coroutine 'WebSocket.send_json' was never awaited", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
 
 # Add server directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "server"))

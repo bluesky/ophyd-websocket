@@ -4,7 +4,7 @@ Test IOC using caproto for simulating EPICS devices
 import asyncio
 from caproto.server import pvproperty, PVGroup, ioc_arg_parser, run
 
-class TestIOC(PVGroup):
+class MockEpicsIOC(PVGroup):
     """
     Test IOC that simulates devices used by ophyd-websocket
     Matches the PV structure expected by the example startup devices
@@ -83,5 +83,5 @@ if __name__ == "__main__":
         desc="Test IOC for ophyd-websocket testing"
     )
     
-    ioc = TestIOC(**ioc_options)
+    ioc = MockEpicsIOC(**ioc_options)
     run(ioc.pvdb, **run_options)

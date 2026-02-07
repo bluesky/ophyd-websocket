@@ -8,7 +8,17 @@ import time
 import subprocess
 import socket
 import sys
+import warnings
 from pathlib import Path
+
+# Filter out expected warnings for cleaner test output
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=pytest.PytestCollectionWarning, message=".*cannot collect test class.*")
+# Suppress specific WebSocket-related warnings
+warnings.filterwarnings("ignore", message="coroutine 'WebSocket.send_json' was never awaited")
+warnings.filterwarnings("ignore", module="ophyd.ophydobj")
+warnings.filterwarnings("ignore", module="_pytest.stash")
+warnings.filterwarnings("ignore", module="_pytest.logging")
 
 # Add the server directory to the Python path so we can import modules
 sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
