@@ -687,3 +687,28 @@ This socket is not recommended for use with true Xray detectors, as the large ar
 docker build -t ophyd-websocket . 
 docker run -p 8001:8001 ophyd-websocket
 ```
+
+# Development
+Optionally set up a conda environment
+```bash
+conda create -n ophyd_websocket python=3.12
+conda activate ophyd_websocket
+```
+Install requirements
+
+```bash
+#/ophyd-websocket
+pip install -r requirements.txt
+```
+
+Install dev requirements
+```bash
+#/ophyd-websocket
+pip install -r requirements-dev.txt
+```
+
+Running Tests
+
+```bash
+python -m pytest tests/ -v --tb=short --maxfail=3
+```
