@@ -4,13 +4,12 @@ Device Registry for managing Ophyd devices across the application and Queue Serv
 import os
 import sys
 import importlib.util
-import urllib.request
-import urllib.error
 import json
 import logging
 import functools
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
+import httpx
 from fastapi import HTTPException
 from ophyd import Device, EpicsSignal
 
@@ -278,9 +277,9 @@ class DeviceRegistry:
 device_registry = DeviceRegistry()
 
 
-async def get_queue_server_status():
+async def get_queue_server_status() -> dict:
     """
-    Get the current status from the queue server
+    Get the current status from the queue server using async HTTP client
     
     Returns:
         dict: Queue server status response
@@ -288,48 +287,50 @@ async def get_queue_server_status():
     Raises:
         HTTPException: If unable to connect or authenticate with queue server
     """
+    url = f"{QSERVER_BASE_URL}/api/status"
+    
+    # Set up headers with API key authentication
+    headers = {
+        "Authorization": f"Apikey {QSERVER_API_KEY}",
+        "Accept": "application/json"
+    }
+    
     try:
-        url = f"{QSERVER_BASE_URL}/api/status"
-        
-        # Create request with API key authentication
-        request = urllib.request.Request(url)
-        request.add_header("Authorization", f"Apikey {QSERVER_API_KEY}")
-        
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode('utf-8'))
-                return data
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication failed - check QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"
+                )
+            elif response.status_code == 403:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access forbidden - API key may not have sufficient permissions"
+                )
             else:
                 raise HTTPException(
-                    status_code=response.status,
-                    detail=f"Queue server returned status {response.status}"
+                    status_code=response.status_code,
+                    detail=f"Queue server returned status {response.status_code}: {response.text}"
                 )
-    except urllib.error.URLError as e:
+                
+    except httpx.ConnectError as e:
         raise HTTPException(
-            status_code=503, 
-            detail=f"Could not connect to queue server at {QSERVER_BASE_URL}: {str(e)}"
+            status_code=503,
+            detail=f"Could not connect to queue server at {QSERVER_BASE_URL}: Connection refused"
         )
-    except urllib.error.HTTPError as e:
-        # Handle authentication errors specifically
-        if e.code == 401:
-            raise HTTPException(
-                status_code=401,
-                detail=f"Authentication failed - check QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"
-            )
-        elif e.code == 403:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Access forbidden - API key may not have sufficient permissions"
-            )
-        else:
-            raise HTTPException(
-                status_code=e.code,
-                detail=f"Queue server returned HTTP {e.code}: {e.reason}"
-            )
-    except json.JSONDecodeError as e:
+    except httpx.TimeoutException as e:
         raise HTTPException(
-            status_code=502,
-            detail=f"Queue server returned invalid JSON: {str(e)}"
+            status_code=504,
+            detail=f"Timeout connecting to queue server at {QSERVER_BASE_URL}"
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Network error connecting to queue server: {str(e)}"
         )
     except Exception as e:
         raise HTTPException(
@@ -338,7 +339,7 @@ async def get_queue_server_status():
         )
 
 
-async def check_queue_server_safety():
+async def check_queue_server_safety() -> bool:
     """
     Check if it's safe to perform device operations (queue is not running)
     
@@ -381,14 +382,14 @@ async def check_queue_server_safety():
                 }
             )
         
+        logger.info(f"Queue server safety check passed: manager_state='{manager_state}', running_item_uid={running_item_uid}")
         return True
         
     except HTTPException as http_exc:
         # Check if this is a connection error and if we're in permissive mode
-        if not OAS_REQUIRE_QSERVER and http_exc.status_code == 503:
+        if not OAS_REQUIRE_QSERVER and http_exc.status_code in (503, 504):
             # In permissive mode, allow operations if queue server is unreachable
-            # (connection refused, timeout, etc.)
-            print(f"Warning: Queue server unreachable at {QSERVER_BASE_URL}, but OAS_REQUIRE_QSERVER=false - allowing device operation")
+            logger.warning(f"Queue server unreachable at {QSERVER_BASE_URL}, but OAS_REQUIRE_QSERVER=false - allowing device operation")
             return True
         
         # Re-raise HTTPExceptions (our custom errors or authentication issues)
@@ -396,7 +397,7 @@ async def check_queue_server_safety():
     except Exception as e:
         if not OAS_REQUIRE_QSERVER:
             # In permissive mode, allow operations on unexpected errors (likely connection issues)
-            print(f"Warning: Unexpected error checking queue server safety, but OAS_REQUIRE_QSERVER=false - allowing device operation: {str(e)}")
+            logger.warning(f"Unexpected error checking queue server safety, but OAS_REQUIRE_QSERVER=false - allowing device operation: {str(e)}")
             return True
         
         # In strict mode, block on any unexpected errors
