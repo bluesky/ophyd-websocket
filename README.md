@@ -39,20 +39,20 @@ pip install -r requirements.txt
 Start the websocket server
 ```bash
 #/ophyd-websocket
-python server/server.py
+python src/ophyd_websocket/server.py
 ```
 
 Start the websocket server with host and port set in command line
 ```bash
 #/ophyd-websocket
-OAS_PORT=8001 OAS_HOST=0.0.0.0 python server/server.py
+OAS_PORT=8001 OAS_HOST=0.0.0.0 python src/ophyd_websocket/server.py
 ```
 
 # Using device-socket for Ophyd devices
 ## Startup Directory
 Any use of the device-socket path will require the server to start with a startup directory, followed by a POST request to instantiate the device registry.
 ```bash
-python server/server.py --startup-dir /path/to/devices.py
+python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 ```
 
 Then make a POST request to /api/v1/load-devices which will load up the --startup-dir file(s).
@@ -403,13 +403,13 @@ export OAS_HOST=0.0.0.0
 export OAS_PORT=8001
 export OAS_STARTUP_DIR=/path/to/devices
 export QSERVER_HTTP_SERVER_HOST=queue-server.local
-python server/server.py
+python src/ophyd_websocket/server.py
 
 # Using command line arguments
-python server/server.py --startup-dir /path/to/devices.py
+python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 
 # Using both (environment variables take precedence)
-OAS_PORT=8002 python server/server.py --startup-dir /path/to/devices
+OAS_PORT=8002 python src/ophyd_websocket/server.py --startup-dir /path/to/devices
 ```
 
 ### Device Loading
@@ -419,7 +419,7 @@ You can load up predefined Ophyd devices with a POST request to `http://localhos
 These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
 
 ```bash
-python server/server.py --startup-dir /path/to/devices.py
+python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 ```
 Then in your python file instantiate your Ophyd devices, which will then be available when making API calls or websocket subscriptions to devices.
 
