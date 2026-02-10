@@ -19,7 +19,7 @@ def test_server_import():
 
 def test_device_registry_basic():
     """Test basic device registry functionality"""
-    from utils.device_registry import DeviceRegistry, device_registry
+    from device_registry import DeviceRegistry, device_registry
     
     registry = DeviceRegistry()
     assert registry is not None
@@ -46,7 +46,7 @@ test_signal = EpicsSignal("IOC:test", name="test_signal")
         temp_file = f.name
     
     try:
-        from utils.device_registry import DeviceRegistry
+        from device_registry import DeviceRegistry
         registry = DeviceRegistry()
         registry.clear()
         

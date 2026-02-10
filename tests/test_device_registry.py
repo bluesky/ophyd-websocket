@@ -15,12 +15,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
 
 def test_device_registry_import():
     """Test that device registry can be imported"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     assert DeviceRegistry is not None
 
 def test_device_registry_singleton():
     """Test that DeviceRegistry global instance exists"""
-    from utils.device_registry import DeviceRegistry, device_registry
+    from device_registry import DeviceRegistry, device_registry
     
     registry1 = DeviceRegistry()
     assert registry1 is not None
@@ -30,7 +30,7 @@ def test_device_registry_singleton():
 
 def test_device_loading_from_file():
     """Test loading devices from a Python file"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     # Create test device file
     test_device_code = '''
@@ -69,7 +69,7 @@ some_config = "test_value"
 
 def test_device_loading_from_directory():
     """Test loading devices from a directory"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     # Create temporary directory with test files
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -106,7 +106,7 @@ motor2 = EpicsSignal("IOC:m2", name="motor2")
 
 def test_get_device_by_name():
     """Test retrieving specific device by name"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     test_device_code = '''
 from ophyd import EpicsSignal
@@ -136,7 +136,7 @@ test_device = EpicsSignal("IOC:test", name="test_device")
 
 def test_device_registry_clear():
     """Test clearing the device registry"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     test_device_code = '''
 from ophyd import EpicsSignal
@@ -163,7 +163,7 @@ temp_device = EpicsSignal("IOC:temp", name="temp_device")
 
 def test_invalid_file_handling():
     """Test handling of invalid Python files"""
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     # Test with non-existent file
     registry = DeviceRegistry()

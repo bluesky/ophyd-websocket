@@ -90,7 +90,7 @@ def test_devices():
     if str(server_path) not in sys.path:
         sys.path.insert(0, str(server_path))
     
-    from utils.device_registry import DeviceRegistry
+    from device_registry import DeviceRegistry
     
     # Define test devices in memory (without needing file)
     test_device_code = '''
@@ -179,7 +179,7 @@ def websocket_client():
     
     # Import server and device registry
     from server import app
-    from utils.device_registry import device_registry
+    from device_registry import device_registry
     
     # Load devices from startup file
     if startup_file.exists():

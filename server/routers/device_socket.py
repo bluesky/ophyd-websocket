@@ -5,7 +5,7 @@ import logging
 from ophyd import EpicsSignalRO, EpicsSignal, Device, EpicsMotor
 from ophyd.pseudopos import PseudoPositioner
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from utils.device_registry import device_registry
+from device_registry import device_registry
 import time
 
 # Set up logger

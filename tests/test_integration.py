@@ -42,7 +42,7 @@ def test_basic_server_setup():
     
     # Import server
     from server import app
-    from utils.device_registry import device_registry
+    from device_registry import device_registry
     
     # Verify app is created
     assert app is not None

@@ -15,7 +15,7 @@ from routers.core_api import router as core_api_router
 from routers.device_socket import router as device_socket_router
 
 # Import device registry
-from utils.device_registry import device_registry
+from device_registry import device_registry
 
 # Configure logging
 logging.basicConfig(
