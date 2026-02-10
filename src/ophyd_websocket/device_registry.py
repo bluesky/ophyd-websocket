@@ -10,7 +10,7 @@ import json
 import logging
 import functools
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Union
 from fastapi import HTTPException
 from ophyd import Device, EpicsSignal
 
@@ -32,22 +32,64 @@ class DeviceRegistry:
     Centralized registry for Ophyd devices that can be accessed by REST API and WebSocket endpoints
     """
     
-    def __init__(self):
+    def __init__(self, startup_path: Optional[Union[str, Path]] = None, auto_load: bool = True):
+        """
+        Initialize the device registry
+        
+        Args:
+            startup_path: Path to directory containing Python startup files or a single Python file.
+                         If None, will use OAS_STARTUP_DIR environment variable.
+            auto_load: If True and startup_path is provided, automatically load devices on initialization
+        """
         self._devices: Dict[str, Device] = {}
-        self._startup_dir: str = None
+        
+        # Determine startup path
+        if startup_path is None:
+            startup_path = os.getenv("OAS_STARTUP_DIR")
+        
+        if startup_path is not None:
+            self._startup_dir = str(startup_path)
+            logger.info(f"[DEVICE_REGISTRY] Startup path set to: {self._startup_dir}")
+            
+            if auto_load:
+                try:
+                    self.load_startup_files(self._startup_dir)
+                except Exception as e:
+                    logger.error(f"Failed to auto-load devices from {self._startup_dir}: {e}")
+                    # Don't raise - allow registry to be created even if loading fails
+        else:
+            self._startup_dir = None
+            logger.info("[DEVICE_REGISTRY] No startup path specified - devices must be added manually")
     
-    def set_startup_dir(self, startup_path: str) -> None:
-        """Set the startup directory or file for device loading"""
-        self._startup_dir = startup_path
-        logger.info(f"[DEVICE_REGISTRY] Startup path set to: {startup_path}")
-        logger.info(f"[DEVICE_REGISTRY] Registry state after setting: _startup_dir = {self._startup_dir}")
-    
-    def get_startup_dir(self) -> str:
-        """Get the current startup directory or file path"""
-        logger.info(f"[DEVICE_REGISTRY] Getting startup path: {self._startup_dir}")
+    @property
+    def startup_dir(self) -> Optional[str]:
+        """Get the current startup directory or file path (read-only property)"""
         return self._startup_dir
     
-    def get_device(self, name: str) -> Device:
+    def set_startup_dir(self, startup_path: Union[str, Path], auto_load: bool = False) -> None:
+        """
+        Set the startup directory or file for device loading
+        
+        Args:
+            startup_path: Path to startup directory or file
+            auto_load: If True, immediately load devices from the new path
+        """
+        old_path = self._startup_dir
+        self._startup_dir = str(startup_path)
+        logger.info(f"[DEVICE_REGISTRY] Startup path changed from {old_path} to {self._startup_dir}")
+        
+        if auto_load:
+            self.load_startup_files(self._startup_dir)
+    
+    def get_startup_dir(self) -> Optional[str]:
+        """Get the current startup directory or file path"""
+        return self._startup_dir
+    
+    def is_configured(self) -> bool:
+        """Check if the registry has been configured with a startup directory"""
+        return self._startup_dir is not None
+    
+    def get_device(self, name: str) -> Optional[Device]:
         """Get a device by name"""
         return self._devices.get(name)
     
@@ -74,7 +116,7 @@ class DeviceRegistry:
         """Get list of all device names"""
         return list(self._devices.keys())
     
-    def get_device_info(self, name: str) -> Dict[str, Any]:
+    def get_device_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a device"""
         device = self._devices.get(name)
         if not device:
@@ -116,19 +158,34 @@ class DeviceRegistry:
         self._devices.clear()
         logger.info(f"Cleared {count} devices from registry")
     
-    def load_startup_files(self, startup_path: str) -> None:
+    def reload_devices(self) -> None:
+        """Reload devices from the current startup directory"""
+        if self._startup_dir is None:
+            raise ValueError("No startup directory configured - cannot reload devices")
+        
+        self.clear()
+        self.load_startup_files(self._startup_dir)
+    
+    def load_startup_files(self, startup_path: Optional[Union[str, Path]] = None) -> None:
         """
         Load Python files from startup directory or single Python file and extract Ophyd devices
         
         Args:
-            startup_path: Path to directory containing Python startup files or a single Python file
+            startup_path: Path to directory containing Python startup files or a single Python file.
+                         If None, uses the configured startup_dir.
         """
-        self._startup_dir = startup_path
+        if startup_path is None:
+            if self._startup_dir is None:
+                raise ValueError("No startup path provided and no startup directory configured")
+            startup_path = self._startup_dir
+        else:
+            # Update the stored startup dir if a new path is provided
+            self._startup_dir = str(startup_path)
+        
         path = Path(startup_path)
         
         if not path.exists():
-            logger.error(f"Startup path does not exist: {startup_path}")
-            return
+            raise FileNotFoundError(f"Startup path does not exist: {startup_path}")
         
         python_files = []
         sys_path_to_add = None
@@ -136,8 +193,7 @@ class DeviceRegistry:
         if path.is_file():
             # Handle single file case
             if not path.suffix == '.py':
-                logger.error(f"Startup file must be a Python file (.py), got: {path.suffix}")
-                return
+                raise ValueError(f"Startup file must be a Python file (.py), got: {path.suffix}")
             python_files = [path]
             sys_path_to_add = str(path.parent)
             logger.info(f"Loading devices from single Python file: {startup_path}")
@@ -150,8 +206,7 @@ class DeviceRegistry:
             sys_path_to_add = str(path)
             logger.info(f"Loading devices from {len(python_files)} Python files in {startup_path}")
         else:
-            logger.error(f"Startup path must be a directory or Python file: {startup_path}")
-            return
+            raise ValueError(f"Startup path must be a directory or Python file: {startup_path}")
         
         # Add appropriate directory to Python path temporarily
         sys.path.insert(0, sys_path_to_add)
@@ -174,13 +229,11 @@ class DeviceRegistry:
             # Create module spec and load the module
             spec = importlib.util.spec_from_file_location(file_path.stem, file_path)
             if spec is None:
-                logger.error(f"Could not create module spec for {file_path}")
-                return
+                raise ImportError(f"Could not create module spec for {file_path}")
             
             module = importlib.util.module_from_spec(spec)
             if module is None:
-                logger.error(f"Could not create module from spec for {file_path}")
-                return
+                raise ImportError(f"Could not create module from spec for {file_path}")
             
             # Execute the module
             spec.loader.exec_module(module)
@@ -196,7 +249,7 @@ class DeviceRegistry:
             
         except Exception as e:
             logger.error(f"Error loading startup file {file_path}: {str(e)}")
-            logger.exception(e)
+            raise  # Re-raise to allow caller to handle
     
     def _is_ophyd_device(self, obj: Any, name: str) -> bool:
         """

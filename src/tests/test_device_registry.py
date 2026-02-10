@@ -153,14 +153,29 @@ temp_device = EpicsSignal("IOC:temp", name="temp_device")
 
 def test_invalid_file_handling():
     """Test handling of invalid Python files"""
-    # Test with non-existent file
+    # Test with non-existent file - should raise FileNotFoundError
     registry = DeviceRegistry()
     registry.clear()
     
-    registry.load_startup_files("/nonexistent/file.py")
+    with pytest.raises(FileNotFoundError):
+        registry.load_startup_files("/nonexistent/file.py")
+    
+    # Verify no devices were loaded due to error
     assert len(registry.list_devices()) == 0
     
-    # Test with invalid Python syntax
+    # Test with non-Python file - should raise ValueError
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write("This is not a Python file")
+        temp_file = f.name
+    
+    try:
+        with pytest.raises(ValueError, match="Startup file must be a Python file"):
+            registry.load_startup_files(temp_file)
+        assert len(registry.list_devices()) == 0
+    finally:
+        os.unlink(temp_file)
+    
+    # Test with invalid Python syntax - should raise exception
     invalid_code = '''
 from ophyd import EpicsSignal
 invalid syntax here!
@@ -171,7 +186,9 @@ invalid syntax here!
         temp_file = f.name
     
     try:
-        registry.load_startup_files(temp_file)
-        assert len(registry.list_devices()) == 0  # Should handle gracefully
+        # Should raise a SyntaxError or similar during module execution
+        with pytest.raises(Exception):  # Could be SyntaxError or other execution error
+            registry.load_startup_files(temp_file)
+        assert len(registry.list_devices()) == 0
     finally:
         os.unlink(temp_file)
