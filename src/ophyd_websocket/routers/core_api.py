@@ -1,16 +1,13 @@
 from typing import Union
-import os
-import urllib.request
-import urllib.error
-import json
 import logging
 
-from fastapi import APIRouter, Response, status, Request, WebSocket, HTTPException
+from fastapi import APIRouter, Response, status, WebSocket
 from pydantic import BaseModel
 from ophyd import EpicsSignal
 
 # Import queue server utilities
-from device_registry import get_queue_server_status, queue_safety_required, device_registry
+from device_registry import device_registry
+from queue_safety import queue_safety_required, get_queue_server_status
 
 # Set up logger
 logger = logging.getLogger(__name__)

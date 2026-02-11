@@ -4,7 +4,6 @@ Test the device registry functionality
 import pytest
 import tempfile
 import os
-import sys
 from pathlib import Path
 
 # Skip all tests if dependencies not available

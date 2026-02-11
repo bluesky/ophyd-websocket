@@ -1,7 +1,6 @@
 """
 Simple integration test to verify testing framework 
 """
-import os
 import sys
 from pathlib import Path
 
@@ -42,7 +41,6 @@ def test_basic_server_setup():
     
     # Import server
     from ophyd_websocket.server import app, device_registry
-    #from device_registry import device_registry
     
     # Verify app is created
     assert app is not None

@@ -6,7 +6,6 @@ import sys
 import pytest
 import warnings
 from pathlib import Path
-from fastapi.testclient import TestClient
 
 # Skip if dependencies not available
 pytest.importorskip("websockets")
