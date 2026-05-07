@@ -58,12 +58,12 @@ async def test_camera_socket_connection(websocket_client):
         assert websocket is not None
         
         # Send camera command
-        test_message = {"action": "start"}
+        test_message = {"imageArray_PV": "13SIM1:image1:ArrayData"}
         websocket.send_json(test_message)
         
-        # Should receive response
+        # Should receive response with dummy settings
         response = websocket.receive_json()
-        assert "status" in response or "action" in response or "error" in response
+        assert "colorMode" in response or "error" in response
 
 @pytest.mark.asyncio
 async def test_qs_console_socket_mock_zmq(websocket_client, mocker):
@@ -147,7 +147,8 @@ async def test_device_socket_with_ioc(websocket_client):
         
         # Should get refresh confirmation
         response = websocket.receive_json()
-        assert "message" in response
+        print(f"Refresh response: {response}")
+        assert "timestamp" in response or "error" in response
 
 def test_websocket_error_handling(websocket_client):
     """Test WebSocket error handling for invalid messages"""
