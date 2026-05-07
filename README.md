@@ -22,40 +22,42 @@ A single websocket instance can hold any number of device subscriptions.
 ```bash 
 git clone https://github.com/bluesky/ophyd-websocket.git 
 ```
-Optionally set up a conda environment
-```bash
-conda create -n ophyd_websocket python=3.12
-conda activate ophyd_websocket
-```
-Install requirements
 
+Install requirements
 ```bash
 #/ophyd-websocket
-pip install -r requirements.txt
+uv sync
 ```
+
+This project utilizes uv. If you wish to install with another method, then in your Python environment of choice run:
+```bash
+#optional instead of uv
+python -m pip install -e .
+```
+Then for all reference commands, omit the 'uv run' command.
 
 # Starting the Websocket
 
 Start the websocket server
 ```bash
 #/ophyd-websocket
-python src/ophyd_websocket/server.py
+uv run python src/ophyd_websocket/server.py
 ```
 
 Start the websocket server with host and port set in command line
 ```bash
 #/ophyd-websocket
-OAS_PORT=8001 OAS_HOST=0.0.0.0 python src/ophyd_websocket/server.py
+OAS_PORT=8001 OAS_HOST=0.0.0.0 uv run python src/ophyd_websocket/server.py
 ```
 
 # Using device-socket for Ophyd devices
 ## Startup Directory
-Any use of the device-socket path will require the server to start with a startup directory, followed by a POST request to instantiate the device registry.
+Any use of the device-socket path will require the server to start with a startup directory.
 ```bash
-python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 ```
 
-Then make a POST request to /api/v1/load-devices which will load up the --startup-dir file(s).
+By default, when the server starts up it will try to instantiate the Ophyd devices. If the startup files change, reload the devices by making a POST request to /api/v1/load-devices.
 
 ```bash
 curl -X 'POST' \
@@ -403,13 +405,13 @@ export OAS_HOST=0.0.0.0
 export OAS_PORT=8001
 export OAS_STARTUP_DIR=/path/to/devices
 export QSERVER_HTTP_SERVER_HOST=queue-server.local
-python src/ophyd_websocket/server.py
+uv run python src/ophyd_websocket/server.py
 
 # Using command line arguments
-python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 
 # Using both (environment variables take precedence)
-OAS_PORT=8002 python src/ophyd_websocket/server.py --startup-dir /path/to/devices
+OAS_PORT=8002 uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices
 ```
 
 ### Device Loading
@@ -419,7 +421,7 @@ You can load up predefined Ophyd devices with a POST request to `http://localhos
 These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
 
 ```bash
-python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
 ```
 Then in your python file instantiate your Ophyd devices, which will then be available when making API calls or websocket subscriptions to devices.
 
@@ -689,26 +691,27 @@ docker run -p 8001:8001 ophyd-websocket
 ```
 
 # Development
-Optionally set up a conda environment
-```bash
-conda create -n ophyd_websocket python=3.12
-conda activate ophyd_websocket
-```
-Install requirements
 
+Install with dev dependencies using uv
 ```bash
-#/ophyd-websocket
-pip install -r requirements.txt
-```
-
-Install dev requirements
-```bash
-#/ophyd-websocket
-pip install -r requirements-dev.txt
+# /ophyd-websocket
+pip install uv        # one-time: install uv into your environment
+uv sync --dev         # installs all dependencies including dev group
 ```
 
 Running Tests
 
 ```bash
-python -m pytest tests/ -v --tb=short --maxfail=3
+uv run pytest
+```
+
+Alternative installation without uv
+```bash
+#example conda environment
+conda create -n ophyd_websocket python=3.12
+conda activate ophyd_websocket
+
+#install from pyproject.toml
+python -m pip install -e .
+python -m pip install -e ".[dev]" #dev dependencies
 ```

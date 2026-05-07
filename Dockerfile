@@ -1,11 +1,11 @@
-FROM --platform=linux/amd64 python:3.12
+FROM --platform=linux/amd64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /code
 
-COPY ./requirements.txt /code/requirements.txt
+COPY pyproject.toml uv.lock* ./
 
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+RUN uv sync --frozen --no-dev
 
 COPY . /code
 
-CMD ["python3", "server/server.py"]
+CMD ["uv", "run", "python", "src/ophyd_websocket/server.py"]
