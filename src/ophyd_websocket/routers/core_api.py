@@ -16,14 +16,14 @@ pv_dict={}
 
 # link for commands for a device: https://nsls-ii.github.io/ophyd/generated/ophyd.device.Device.html#ophyd.device.Device
 
-class DeviceInstruction(BaseModel):
+class EpicsPVInstruction(BaseModel): 
     pv: str
-    set_value: int
+    set_value: Union[str, int, float]
     timeout: int | None = None
 
-class DeviceSetInstruction(BaseModel):
+class OphydDeviceInstruction(BaseModel): 
     device: str
-    value: Union[str, int, float]
+    set_value: Union[str, int, float]
     component: str | None = None
     timeout: int | None = None
 
@@ -137,7 +137,7 @@ def get_all_devices_info():
 
 @router.put("/devices", status_code=200, tags=["Ophyd Devices"])
 @queue_safety_required
-async def set_device_value(instruction: DeviceSetInstruction, response: Response):
+async def set_device_value(instruction: OphydDeviceInstruction, response: Response):
     """
     Set a value on a device from the device registry
     
@@ -184,7 +184,7 @@ async def set_device_value(instruction: DeviceSetInstruction, response: Response
             }
         
         # Perform the set operation
-        set_result = target.set(instruction.value)
+        set_result = target.set(instruction.set_value)
         
         # Apply timeout if specified
         if instruction.timeout is not None:
@@ -200,15 +200,15 @@ async def set_device_value(instruction: DeviceSetInstruction, response: Response
         else:
             return {
                 "success": True,
-                "message": f"Set operation initiated for {target_name} to {instruction.value}",
+                "message": f"Set operation initiated for {target_name} to {instruction.set_value}",
                 "device": instruction.device,
                 "component": instruction.component,
-                "value": instruction.value,
+                "value": instruction.set_value,
                 "note": "No timeout specified - operation may complete asynchronously"
             }
         
     except Exception as error:
-        logger.error(f"Could not set device {target_name} to {instruction.value}")
+        logger.error(f"Could not set device {target_name} to {instruction.set_value}")
         logger.error(f"Error details: {error}")
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {
@@ -216,7 +216,7 @@ async def set_device_value(instruction: DeviceSetInstruction, response: Response
             "message": str(error),
             "device": instruction.device,
             "component": instruction.component,
-            "value": instruction.value
+            "value": instruction.set_value
         }
 
 @router.get("/queue-server/status", tags=["Queue Server"])
@@ -274,7 +274,7 @@ def connect_to_pv(pv, response: Response):
     
 @router.put("/pvs", status_code=200, tags=["EPICS PVs"])
 @queue_safety_required
-async def set_pv_value(instruction: DeviceInstruction, response: Response):
+async def set_pv_value(instruction: EpicsPVInstruction, response: Response):
     """
     Move a device to a new position
     
