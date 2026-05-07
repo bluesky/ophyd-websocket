@@ -18,9 +18,11 @@ from routers.device_socket import router as device_socket_router
 from device_registry import device_registry
 
 # Configure logging
+_log_level = getattr(logging, os.getenv("OAS_LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=_log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,10 @@ def log_environment_and_startup_info(startup_dir=None):
     # OAS specific variables with actual defaults
     env_vars["OAS_PORT"] = os.getenv("OAS_PORT", "8001")
     env_vars["OAS_HOST"] = os.getenv("OAS_HOST", "localhost")
-    env_vars["OAS_REQUIRE_QSERVER"] = os.getenv("OAS_REQUIRE_QSERVER", "true")
+    env_vars["OAS_REQUIRE_QSERVER"] = os.getenv("OAS_REQUIRE_QSERVER", "false")
     env_vars["OAS_ALLOWED_ORIGINS"] = os.getenv("OAS_ALLOWED_ORIGINS", "Not set")
     env_vars["OAS_STARTUP_DIR"] = os.getenv("OAS_STARTUP_DIR", "Not set")
+    env_vars["OAS_LOG_LEVEL"] = os.getenv("OAS_LOG_LEVEL", "INFO")
     
     # Queue Server variables with defaults
     env_vars["QSERVER_HTTP_SERVER_HOST"] = os.getenv("QSERVER_HTTP_SERVER_HOST", "localhost")
@@ -59,7 +62,7 @@ def log_environment_and_startup_info(startup_dir=None):
         env_vars[var] = os.getenv(var, "Not set")
     
     # Define variable groups for organized display
-    oas_vars = ["OAS_PORT", "OAS_HOST", "OAS_REQUIRE_QSERVER", "OAS_ALLOWED_ORIGINS", "OAS_STARTUP_DIR"]
+    oas_vars = ["OAS_PORT", "OAS_HOST", "OAS_REQUIRE_QSERVER", "OAS_ALLOWED_ORIGINS", "OAS_STARTUP_DIR", "OAS_LOG_LEVEL"]
     qserver_vars = ["QSERVER_HTTP_SERVER_HOST", "QSERVER_HTTP_SERVER_PORT", "QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"]
     
     # Build startup information message

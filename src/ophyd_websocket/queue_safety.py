@@ -18,8 +18,8 @@ QSERVER_PORT = os.getenv("QSERVER_HTTP_SERVER_PORT", "60610")
 QSERVER_API_KEY = os.getenv("QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY", "test")
 QSERVER_BASE_URL = f"http://{QSERVER_HOST}:{QSERVER_PORT}"
 
-# Safety configuration - default to requiring queue server for safety
-OAS_REQUIRE_QSERVER = os.getenv("OAS_REQUIRE_QSERVER", "true").lower() in ("true", "1", "yes", "on")
+# Safety configuration - default to not requiring queue server for safety since socket may be ran without a qserver
+OAS_REQUIRE_QSERVER = os.getenv("OAS_REQUIRE_QSERVER", "false").lower() in ("true", "1", "yes", "on")
 
 async def get_queue_server_status() -> dict:
     """
