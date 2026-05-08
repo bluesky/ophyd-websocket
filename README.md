@@ -1,5 +1,5 @@
 # ophyd-websocket
-Experimental python based websocket server used to live-monitor and set ophyd device values through a web browser. Please use branch feature/oas for the most recent updates.
+Experimental python based websocket server used to live-monitor and set ophyd device values through a web browser.
 
 ## Use Case 
 If you are building a web browser application and need to:
@@ -142,11 +142,11 @@ Responses from server over websocket:
 # Messages and Responses
 ```mermaid
 sequenceDiagram
-        Browser<<-->>Ophyd-Websocket: Connect
+        Browser<<-->>Ophyd-Websocket: Connect /device-socket
         Browser->>Ophyd-Websocket: Subscribe mono
         activate Ophyd-Websocket
         Ophyd-Websocket->>Control-System: Subscribe mono
-        EPICS<<-->>Ophyd-Websocket: mono Updates
+        Control-System<<-->>Ophyd-Websocket: mono Updates
         Ophyd-Websocket->>Browser: mono metadata
         Ophyd-Websocket->>Browser: mono current value
         deactivate Ophyd-Websocket
