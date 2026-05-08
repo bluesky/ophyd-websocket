@@ -378,8 +378,9 @@ The server can be configured using environment variables or command line argumen
 | Host | `OAS_HOST` | `localhost` | Server host address |
 | Port | `OAS_PORT` | `8001` | Server port number |
 | Startup Directory | `OAS_STARTUP_DIR` | None | Path to directory containing device definition files |
-| Require Queue Server | `OAS_REQUIRE_QSERVER` | `true` | Whether queue server safety checks are enforced |
+| Require Queue Server | `OAS_REQUIRE_QSERVER` | `false` | Whether queue server safety checks are enforced |
 | Allowed Origins | `OAS_ALLOWED_ORIGINS` | None | Additional CORS origins (comma-separated) |
+| Host | `OAS_LOG_LEVEL` | `INFO` | Log level |
 
 #### Queue Server Configuration
 The REST API endpoints for setting values of devices can optionally first check if the Queue Server is active and reject requests if a plan is running. This feature is currently only available on the REST endpoints, not the websockets, but is planned to be added to websockets.
