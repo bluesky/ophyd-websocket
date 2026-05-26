@@ -1,28 +1,22 @@
 # React Hooks
-To use ophyd websocket with a React app, a custom hook ```useOphydSocket.ts``` is provided along with supporting types.
+To use ophyd websocket with a React app, the custom hooks ```useOphydPVSocket.ts``` and ```useOphydDeviceSocket.ts``` are provided from Finch along with supporting types.
 
-## Connecting to a single epics pv
+## Connecting to a single EPICS PV
 
 ```javascript
-import { useMemo } from 'react';
-import useOphydSocket from './useOphydSocket';
+import useOphyPVdSocket from './useOphydPVSocket';
 
-const deviceNameList = useMemo(()=>['bl531_xps2:sample_x_mm'], []);
+const deviceNameList = ['bl531_xps2:sample_x_mm'];
 
-const { devices, handleSetValueRequest, toggleDeviceLock, toggleExpand } = useOphydSocket(deviceNameList)
+const { devices, handleSetValueRequest, toggleDeviceLock, toggleExpand } = useOphydPVSocket(deviceNameList)
 ```
-Why ```useMemo```?
 
-The point of useMemo is to prevent the custom hook from re-creating the websocket. We memoize the input arg (a list of pvs) so that when eventual updates to ```devices``` tells React to re-render the component, the original input arg is not re-created. 
-
-
-
-## Connecting to multiple epics pvs
+## Connecting to multiple EPICS PVs
 
 ```javascript
-const deviceNameList = useMemo(()=>['bl531_xps2:sample_x_mm', 'bl531_xps:sample_y_mm'], []);
+const deviceNameList =['bl531_xps2:sample_x_mm', 'bl531_xps:sample_y_mm'];
 
-const { devices, handleSetValueRequest, toggleDeviceLock, toggleExpand } = useOphydSocket(deviceNameList)
+const { devices, handleSetValueRequest, toggleDeviceLock, toggleExpand } = useOphydPVSocket(deviceNameList)
 ```
 Note that even though we sent in multiple pvs, the hook only creates a single websocket, and a single ```devices``` state variable that will contain the live information for all pvs.
 
@@ -50,3 +44,15 @@ handleSetValueRequest(sampleHolderX.name, newValue);
 ```
 This function sends a message to the websocket to set the new value. The websocket currently does not support writing strings, but this will be added soon.
 
+## Connecting to a single Ophyd Device
+Note you will need to have started up the server with a directory that contains your ophyd device python files. 
+
+```javascript
+import useOphyDevicedSocket from './useOphydDeviceSocket';
+
+const deviceNameList = ['sim_motor'];
+
+const { devices, handleSetValueRequest, toggleDeviceLock, toggleExpand } = useOphydDeviceSocket(deviceNameList)
+```
+
+Reading and setting values are the same as the functions from `useOphydPVSocket`
