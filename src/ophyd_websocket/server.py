@@ -8,14 +8,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import all the routers
-from routers.pv_socket import router as pv_socket_router
-from routers.camera_socket import router as camera_socket_router  
-from routers.qs_console_socket import router as qs_console_socket_router
-from routers.core_api import router as core_api_router
-from routers.device_socket import router as device_socket_router
+from ophyd_websocket.routers.pv_socket import router as pv_socket_router
+from ophyd_websocket.routers.camera_socket import router as camera_socket_router
+from ophyd_websocket.routers.qs_console_socket import router as qs_console_socket_router
+from ophyd_websocket.routers.core_api import router as core_api_router
+from ophyd_websocket.routers.device_socket import router as device_socket_router
 
 # Import device registry
-from device_registry import device_registry
+from ophyd_websocket.device_registry import device_registry
 
 # Configure logging
 _log_level = getattr(logging, os.getenv("OAS_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -317,24 +317,24 @@ def read_root():
         "description": "This server provides WebSocket endpoints for EPICS PV monitoring, camera streaming, queue server communication, and REST API endpoints for device management."
     }
 
-if __name__ == "__main__":
-    # Parse command line arguments
+def main():
     args = parse_arguments()
-    
+
     logger.info(f"[SERVER] Parsed startup directory argument: {args.startup_dir}")
-    
-    # Store startup directory in environment variable so it persists across uvicorn reloads
+
     if args.startup_dir:
         logger.info(f"[SERVER] Setting OAS_STARTUP_DIR environment variable: {args.startup_dir}")
         os.environ["OAS_STARTUP_DIR"] = args.startup_dir
     else:
         logger.info("[SERVER] No startup directory provided")
-    
-    # Get configuration from environment variables
+
     port = int(OAS_PORT)
-    host = os.getenv("OAS_HOST", "0.0.0.0")  # Use different default for server binding
-    
-    # Log comprehensive startup information (before device loading)
+    host = os.getenv("OAS_HOST", "0.0.0.0")
+
     log_environment_and_startup_info(args.startup_dir)
-    
-    uvicorn.run("server:app", host=host, port=port, reload=True)
+
+    uvicorn.run("ophyd_websocket.server:app", host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

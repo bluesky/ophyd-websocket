@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from ophyd import EpicsSignal
 
 # Import queue server utilities
-from device_registry import device_registry
-from queue_safety import queue_safety_required, get_queue_server_status
+from ophyd_websocket.device_registry import device_registry
+from ophyd_websocket.queue_safety import queue_safety_required, get_queue_server_status
 
 # Set up logger
 logger = logging.getLogger(__name__)
