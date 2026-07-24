@@ -10,6 +10,36 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+def _serialize_pv_value(value):
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+
+        if value.dtype.kind in ["S", "a", "U"]:
+            string_value = "".join(str(item) for item in value.tolist())
+            return string_value.rstrip("\x00")
+
+        if value.dtype.kind in ["i", "u"]:
+            flattened = value.ravel()
+            non_zero_values = flattened[flattened != 0]
+
+            is_byte_range = non_zero_values.size > 0 and np.all((non_zero_values >= 0) & (non_zero_values <= 255))
+            looks_like_ascii_text = is_byte_range and np.all((non_zero_values >= 9) & (non_zero_values <= 126))
+
+            if looks_like_ascii_text:
+                try:
+                    return bytes(non_zero_values.astype(np.uint8).tolist()).decode("utf-8").rstrip("\x00")
+                except UnicodeDecodeError:
+                    pass
+
+        return value.tolist()
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    return value
+
 @router.websocket("/pv-socket")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -34,16 +64,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Connection closed while sending update for PV: {pv_name}")
 
         def callbackValue(value, timestamp, **kwargs):
-            if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
+            if isinstance(value, np.ndarray):
+                array_sum = "unavailable"
                 try:
-                    # Remove null bytes and convert to string
-                    cleaned_array = value[value != 0]  # Remove null terminators
-                    if len(cleaned_array) > 0:
-                        string_value = ''.join(chr(x) for x in cleaned_array)
-                        value = string_value
-                except (ValueError, OverflowError):
-                    # If conversion fails, keep original value
+                    summed = np.sum(value)
+                    array_sum = summed.item() if isinstance(summed, np.generic) else summed
+                except Exception:
                     pass
+
+                logger.debug(
+                    "Detected ndarray for PV %s: dtype=%s, length=%s, sum=%s",
+                    pv_name,
+                    value.dtype,
+                    value.size,
+                    array_sum,
+                )
+
+            value = _serialize_pv_value(value)
             # Runs only when the value changes, not when the signal disconnects OR reconnects
             logger.debug(f"PV value update: {pv_name} = {value} (type: {type(value)})")
             message = {
