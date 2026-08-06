@@ -1,0 +1,9 @@
+# guarneri device config for the test suite.
+# Names/PVs match the caproto test IOC (test_ioc.py); loaded fake by default.
+ophyd.EpicsSignal:
+  - {name: m1, read_pv: "IOC:m1"}
+  - {name: m2, read_pv: "IOC:m2"}
+  - {name: detector_counts, read_pv: "IOC:detector:counts"}
+
+ophyd.EpicsMotor:
+  - {name: m2_motor, prefix: "IOC:m2:"}

@@ -1,0 +1,15 @@
+# Example guarneri device config for ophyd-websocket.
+#
+# Point the server at this file:  --startup-dir <path>/devices.yaml
+# (or set OAS_STARTUP_DIR). Set OAS_FAKE_DEVICES=true to simulate the devices
+# with no EPICS connection.
+#
+# Each top-level key is a dotted import path to an ophyd Device/Signal class (or
+# a factory); guarneri imports it dynamically. Each list item is the keyword
+# arguments passed to that class. Devices are looked up by their `name`.
+ophyd.EpicsSignal:
+  - {name: motor1, read_pv: "IOC:m1"}
+  - {name: detector_counts, read_pv: "IOC:detector:counts"}
+
+ophyd.EpicsMotor:
+  - {name: motor2, prefix: "IOC:m2:"}

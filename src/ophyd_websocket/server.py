@@ -142,7 +142,7 @@ def log_environment_and_startup_info(startup_dir=None):
     # Add device registry information
     if startup_dir:
         startup_info.append(f"Startup Directory: {startup_dir}")
-        startup_info.append("Device Loading: Manual (use POST /load-devices endpoint)")
+        startup_info.append("Device Loading: automatic on startup (reload via POST /load-devices)")
         startup_info.append(f"Load Command: curl -X POST http://{env_vars['OAS_HOST']}:{env_vars['OAS_PORT']}/load-devices")
     else:
         startup_info.append("No startup directory specified - no devices will be loaded")
@@ -164,15 +164,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"[LIFESPAN] OAS_STARTUP_DIR environment variable: {startup_dir}")
     
     if startup_dir:
-        logger.info(f"[LIFESPAN] Setting startup directory in device registry: {startup_dir}")
+        logger.info(f"[LIFESPAN] Loading devices from config: {startup_dir}")
         device_registry.set_startup_dir(startup_dir)
+        try:
+            device_registry.load_config(startup_dir)
+            await device_registry.connect()
+        except FileNotFoundError as e:
+            logger.error(f"[LIFESPAN] Device config not found: {e}")
     else:
         logger.info("[LIFESPAN] No startup directory found in environment")
     
     # Verify the startup directory is properly set
     stored_dir = device_registry.get_startup_dir()
     logger.info(f"[LIFESPAN] Final startup directory in registry: {stored_dir}")
-    logger.info("[LIFESPAN] Server ready - use /load-devices endpoint to load devices")
+    logger.info(f"[LIFESPAN] Server ready with devices: {device_registry.list_devices()}")
     
     yield
     

@@ -63,7 +63,7 @@ def load_devices_from_startup(response: Response):
         
         # Load devices from startup directory
         logger.info(f"[LOAD_DEVICES] Loading devices from: {startup_dir}")
-        device_registry.load_startup_files(startup_dir)
+        device_registry.load_config(startup_dir)
         
         devices = device_registry.list_devices()
         logger.info(f"[LOAD_DEVICES] Successfully loaded {len(devices)} devices: {devices}")
