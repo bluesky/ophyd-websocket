@@ -1,193 +1,130 @@
-"""
-Test the device registry functionality
-"""
-import pytest
+"""Test the guarneri-backed device registry."""
 import tempfile
-import os
 from pathlib import Path
 
-# Skip all tests if dependencies not available
-pytest.importorskip("ophyd")
+import pytest
 
-#sys.path.insert(0, str(Path(__file__).parent.parent / "ophyd_websocket"))
-from ophyd_websocket.device_registry import DeviceRegistry, device_registry
+pytest.importorskip("guarneri")
+
+from device_registry import DeviceRegistry, device_registry
+
+M1 = 'ophyd.EpicsSignal:\n  - {name: m1, read_pv: "IOC:m1"}\n'
+DET = 'ophyd.EpicsSignal:\n  - {name: detector, read_pv: "IOC:detector:counts"}\n'
+
+
+def _write_yaml(text: str) -> str:
+    f = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+    f.write(text)
+    f.close()
+    return f.name
 
 
 def test_device_registry_import():
-    """Test that device registry can be imported"""
     assert DeviceRegistry is not None
 
+
 def test_device_registry_singleton():
-    """Test that DeviceRegistry global instance exists"""    
-    registry1 = DeviceRegistry()
-    assert registry1 is not None
-    
-    # Test global instance
+    assert DeviceRegistry() is not None
     assert device_registry is not None
 
+
 def test_device_loading_from_file():
-    """Test loading devices from a Python file"""
-    # Create test device file
-    test_device_code = '''
-from ophyd import EpicsSignal
-
-# Public devices (should be detected)
-m1 = EpicsSignal("IOC:m1", name="m1")
-detector = EpicsSignal("IOC:detector:counts", name="detector")
-
-# Private device (should be ignored)
-_private = EpicsSignal("IOC:private", name="private")
-
-# Non-device variable (should be ignored)
-some_config = "test_value"
-'''
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(test_device_code)
-        temp_file = f.name
-    
+    cfg = _write_yaml(
+        'ophyd.EpicsSignal:\n'
+        '  - {name: m1, read_pv: "IOC:m1"}\n'
+        '  - {name: detector, read_pv: "IOC:detector:counts"}\n'
+    )
     try:
         registry = DeviceRegistry()
-        registry.clear()  # Start fresh
-        
-        registry.load_startup_files(temp_file)
+        registry.clear()
+        registry.load_config(cfg, fake=True)
         devices = registry.list_devices()
-        
-        # Should load 2 devices (m1 and detector), ignore _private and some_config
-        assert len(devices) == 2
-        assert "m1" in devices
-        assert "detector" in devices
-        assert "private" not in devices  # _private should be ignored
-        
+        assert set(devices) == {"m1", "detector"}, devices
     finally:
-        os.unlink(temp_file)
+        Path(cfg).unlink()
+
 
 def test_device_loading_from_directory():
-    """Test loading devices from a directory"""
-    # Create temporary directory with test files
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Create file 1
-        file1_content = '''
-from ophyd import EpicsSignal
-motor1 = EpicsSignal("IOC:m1", name="motor1")
-'''
-        with open(os.path.join(temp_dir, "devices1.py"), 'w') as f:
-            f.write(file1_content)
-        
-        # Create file 2 
-        file2_content = '''
-from ophyd import EpicsSignal
-motor2 = EpicsSignal("IOC:m2", name="motor2")
-'''
-        with open(os.path.join(temp_dir, "devices2.py"), 'w') as f:
-            f.write(file2_content)
-        
-        # Create non-Python file (should be ignored)
-        with open(os.path.join(temp_dir, "readme.txt"), 'w') as f:
-            f.write("This should be ignored")
-        
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "devices_a.yaml").write_text(
+            'ophyd.EpicsSignal:\n  - {name: motor1, read_pv: "IOC:m1"}\n'
+        )
+        (Path(d) / "devices_b.yaml").write_text(
+            'ophyd.EpicsSignal:\n  - {name: motor2, read_pv: "IOC:m2"}\n'
+        )
+        (Path(d) / "readme.txt").write_text("ignored")  # non-config, skipped
         registry = DeviceRegistry()
-        registry.clear()  # Start fresh
-        
-        registry.load_startup_files(temp_dir)
+        registry.clear()
+        registry.load_config(d, fake=True)
         devices = registry.list_devices()
-        
-        # Should load devices from both Python files
-        assert len(devices) >= 2  # At least 2 devices
-        assert "motor1" in devices
-        assert "motor2" in devices
+        assert set(devices) == {"motor1", "motor2"}, devices
+
+
+def test_non_device_configs_skipped_in_directory():
+    # A BITS-style configs/ dir mixes device YAMLs with non-device configs
+    # (iconfig.yml, extra_logging.yml, and tiled_*.yml tiled server configs).
+    # A directory load only picks up "devices*" files, so the non-device configs
+    # are ignored -- parsing them as device configs would fail (their top-level
+    # values are settings, not lists of device kwargs).
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "devices_motors.yml").write_text(
+            'ophyd.EpicsMotor:\n  - {name: m1, prefix: "IOC:m1:"}\n'
+        )
+        (Path(d) / "iconfig.yml").write_text(
+            "DATABROKER_CATALOG: temp\nBEC:\n  PLOTS: false\n"
+        )
+        (Path(d) / "extra_logging.yml").write_text("version: 1\n")
+        (Path(d) / "tiled_config_bl531.yml").write_text(
+            "authentication:\n  allow_anonymous_access: true\n"
+            "uvicorn:\n  port: 8000\n"
+        )
+        registry = DeviceRegistry()
+        registry.clear()
+        registry.load_config(d, fake=True)
+        assert set(registry.list_devices()) == {"m1"}, registry.list_devices()
+
 
 def test_get_device_by_name():
-    """Test retrieving specific device by name"""
-    test_device_code = '''
-from ophyd import EpicsSignal
-test_device = EpicsSignal("IOC:test", name="test_device")
-'''
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(test_device_code)
-        temp_file = f.name
-    
+    cfg = _write_yaml('ophyd.EpicsSignal:\n  - {name: test_device, read_pv: "IOC:test"}\n')
     try:
         registry = DeviceRegistry()
-        registry.clear()  # Start fresh
-        registry.load_startup_files(temp_file)
-        
-        # Test getting existing device
+        registry.clear()
+        registry.load_config(cfg, fake=True)
         device = registry.get_device("test_device")
         assert device is not None
         assert device.name == "test_device"
-        
-        # Test getting non-existent device
-        device = registry.get_device("nonexistent")
-        assert device is None
-        
+        assert registry.get_device("nonexistent") is None
     finally:
-        os.unlink(temp_file)
+        Path(cfg).unlink()
+
 
 def test_device_registry_clear():
-    """Test clearing the device registry"""
-    test_device_code = '''
-from ophyd import EpicsSignal
-temp_device = EpicsSignal("IOC:temp", name="temp_device")
-'''
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(test_device_code)
-        temp_file = f.name
-    
+    cfg = _write_yaml(M1)
     try:
         registry = DeviceRegistry()
-        registry.load_startup_files(temp_file)
-        
-        # Verify device is loaded
+        registry.load_config(cfg, fake=True)
         assert len(registry.list_devices()) > 0
-        
-        # Clear and verify empty
         registry.clear()
-        assert len(registry.list_devices()) == 0
-        
+        assert registry.list_devices() == []
     finally:
-        os.unlink(temp_file)
+        Path(cfg).unlink()
 
-def test_invalid_file_handling():
-    """Test handling of invalid Python files"""
-    # Test with non-existent file - should raise FileNotFoundError
+
+def test_missing_config_raises():
     registry = DeviceRegistry()
     registry.clear()
-    
     with pytest.raises(FileNotFoundError):
-        registry.load_startup_files("/nonexistent/file.py")
-    
-    # Verify no devices were loaded due to error
-    assert len(registry.list_devices()) == 0
-    
-    # Test with non-Python file - should raise ValueError
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        f.write("This is not a Python file")
-        temp_file = f.name
-    
+        registry.load_config("/nonexistent/devices.yaml", fake=True)
+    assert registry.list_devices() == []
+
+
+def test_unknown_device_class_is_skipped():
+    # guarneri warns and skips a device_class it cannot import; nothing registered.
+    cfg = _write_yaml('not_a_real.module.Klass:\n  - {name: x, prefix: "IOC:"}\n')
     try:
-        with pytest.raises(ValueError, match="Startup file must be a Python file"):
-            registry.load_startup_files(temp_file)
-        assert len(registry.list_devices()) == 0
+        registry = DeviceRegistry()
+        registry.clear()
+        registry.load_config(cfg, fake=True)
+        assert registry.list_devices() == []
     finally:
-        os.unlink(temp_file)
-    
-    # Test with invalid Python syntax - should raise exception
-    invalid_code = '''
-from ophyd import EpicsSignal
-invalid syntax here!
-'''
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(invalid_code)
-        temp_file = f.name
-    
-    try:
-        # Should raise a SyntaxError or similar during module execution
-        with pytest.raises(Exception):  # Could be SyntaxError or other execution error
-            registry.load_startup_files(temp_file)
-        assert len(registry.list_devices()) == 0
-    finally:
-        os.unlink(temp_file)
+        Path(cfg).unlink()

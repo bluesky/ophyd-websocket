@@ -1,263 +1,192 @@
+"""Device loading & management, backed by guarneri.
+
+guarneri's :class:`~guarneri.Instrument` owns both loading (from a TOML/YAML
+config file) and the ophyd registry that holds the created devices (keyed by
+each device's ophyd ``.name``). This module is a thin adapter that preserves the
+method surface the routers and server already use.
 """
-Device Registry for managing Ophyd devices across the application and Queue Server safety checks
-"""
-import os
-import sys
-import importlib.util
 import logging
+import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
-from ophyd import Device, EpicsSignal
+from typing import Any, Optional, Union
+
+from guarneri import Instrument
+from guarneri.exceptions import ComponentNotFound
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_SUFFIXES = (".yaml", ".yml", ".toml")
+
+# When a directory is loaded, only files whose name starts with "devices" are
+# treated as device configs (e.g. devices.yml, devices_motors.yml) -- the BITS
+# naming convention. Everything else in a BITS-style configs/ dir (iconfig.yml,
+# tiled_config*.yml, ...) is left alone. Pointing at an explicit file always
+# loads it, regardless of name.
+_DEVICE_CONFIG_PREFIX = "devices"
+
+
+def _fake_from_env() -> bool:
+    """Whether to build simulated devices, from the OAS_FAKE_DEVICES env var."""
+    return os.getenv("OAS_FAKE_DEVICES", "false").lower() in ("1", "true", "yes", "on")
+
 
 class DeviceRegistry:
+    """Thin adapter over :class:`guarneri.Instrument`.
+
+    ``self.instrument`` does the loading; ``self.devices`` is guarneri's ophyd
+    registry (look devices up by their ophyd ``.name``).
     """
-    Centralized registry for Ophyd devices that can be accessed by REST API and WebSocket endpoints
-    """
-    
-    def __init__(self, startup_path: Optional[Union[str, Path]] = None, auto_load: bool = True):
-        """
-        Initialize the device registry
-        
-        Args:
-            startup_path: Path to directory containing Python startup files or a single Python file.
-                         If None, will use OAS_STARTUP_DIR environment variable.
-            auto_load: If True and startup_path is provided, automatically load devices on initialization
-        """
-        self._devices: Dict[str, Device] = {}
-        
-        # Determine startup path
-        if startup_path is None:
-            startup_path = os.getenv("OAS_STARTUP_DIR")
-        
-        if startup_path is not None:
-            self._startup_dir = str(startup_path)
-            logger.info(f"[DEVICE_REGISTRY] Startup path set to: {self._startup_dir}")
-            
-            if auto_load:
-                try:
-                    self.load_startup_files(self._startup_dir)
-                except Exception as e:
-                    logger.error(f"Failed to auto-load devices from {self._startup_dir}: {e}")
-                    # Don't raise - allow registry to be created even if loading fails
-        else:
-            self._startup_dir = None
-            logger.info("[DEVICE_REGISTRY] No startup path specified - devices must be added manually")
-    
+
+    def __init__(
+        self,
+        startup_path: Optional[Union[str, Path]] = None,
+        device_classes: Optional[dict] = None,
+    ):
+        # Empty device_classes => guarneri dynamically imports the dotted-path
+        # keys in the config file (e.g. "ophyd.EpicsMotor").
+        self.instrument = Instrument(device_classes or {})
+        self.devices = self.instrument.devices
+        self._startup_dir = (
+            str(startup_path) if startup_path else os.getenv("OAS_STARTUP_DIR")
+        )
+        # No auto-load at import: the server lifespan (or /load-devices) loads.
+        logger.info("[DEVICE_REGISTRY] Config path: %s", self._startup_dir)
+
+    # --- config path (method names kept for server.py compatibility) ---
     @property
     def startup_dir(self) -> Optional[str]:
-        """Get the current startup directory or file path (read-only property)"""
         return self._startup_dir
-    
-    def set_startup_dir(self, startup_path: Union[str, Path], auto_load: bool = False) -> None:
-        """
-        Set the startup directory or file for device loading
-        
-        Args:
-            startup_path: Path to startup directory or file
-            auto_load: If True, immediately load devices from the new path
-        """
-        old_path = self._startup_dir
-        self._startup_dir = str(startup_path)
-        logger.info(f"[DEVICE_REGISTRY] Startup path changed from {old_path} to {self._startup_dir}")
-        
-        if auto_load:
-            self.load_startup_files(self._startup_dir)
-    
+
     def get_startup_dir(self) -> Optional[str]:
-        """Get the current startup directory or file path"""
         return self._startup_dir
-    
+
+    def set_startup_dir(
+        self, startup_path: Union[str, Path], auto_load: bool = False
+    ) -> None:
+        self._startup_dir = str(startup_path)
+        logger.info("[DEVICE_REGISTRY] Config path set to: %s", self._startup_dir)
+        if auto_load:
+            self.load_config(self._startup_dir)
+
     def is_configured(self) -> bool:
-        """Check if the registry has been configured with a startup directory"""
         return self._startup_dir is not None
-    
-    def get_device(self, name: str) -> Optional[Device]:
-        """Get a device by name"""
-        return self._devices.get(name)
-    
-    def add_device(self, name: str, device: Device) -> None:
-        """Add a device to the registry"""
-        if not isinstance(device, (Device, EpicsSignal)):
-            raise ValueError(f"Device {name} must be an Ophyd Device or EpicsSignal, got {type(device)}")
-        
-        if name in self._devices:
-            logger.warning(f"Device '{name}' already exists in registry, replacing...")
-        
-        self._devices[name] = device
-        logger.info(f"Added device '{name}' to registry (type: {type(device).__name__})")
-    
+
+    # --- loading (guarneri) ---
+    def load_config(
+        self,
+        startup_path: Optional[Union[str, Path]] = None,
+        *,
+        fake: Optional[bool] = None,
+    ) -> None:
+        """Load devices from a guarneri config file, or a directory of them.
+
+        *startup_path* may be a single ``.toml``/``.yaml``/``.yml`` file (loaded
+        as-is), or a directory -- in which case only ``devices*`` config files
+        are loaded (sorted), matching the BITS naming convention. If *fake* is
+        ``None`` it is read from the ``OAS_FAKE_DEVICES`` environment variable.
+        """
+        if fake is None:
+            fake = _fake_from_env()
+        path = Path(startup_path) if startup_path else (
+            Path(self._startup_dir) if self._startup_dir else None
+        )
+        if path is None or not path.exists():
+            raise FileNotFoundError(f"Config path does not exist: {path}")
+        self._startup_dir = str(path)
+        files = (
+            [path]
+            if path.is_file()
+            else sorted(
+                f
+                for f in path.iterdir()
+                if f.name.startswith(_DEVICE_CONFIG_PREFIX)
+                and f.suffix in _CONFIG_SUFFIXES
+            )
+        )
+        if not files:
+            logger.warning("No 'devices*' config files found in %s", path)
+            return
+        for config_file in files:
+            logger.info("Loading devices from %s (fake=%s)", config_file, fake)
+            self.instrument.load(str(config_file), fake=fake)
+        logger.info(
+            "Device registry loaded with %d devices: %s",
+            len(self.devices.device_names),
+            self.list_devices(),
+        )
+
+    async def connect(self, timeout: float = 5.0):
+        """Connect all loaded devices in parallel. Never raises; logs failures."""
+        connected, exceptions = await self.instrument.connect(
+            timeout=timeout, return_exceptions=True
+        )
+        for name, exc in (exceptions or {}).items():
+            logger.warning("Device '%s' failed to connect: %s", name, exc)
+        return connected
+
+    def reload_devices(self) -> None:
+        """Clear and reload devices from the current config path."""
+        if self._startup_dir is None:
+            raise ValueError("No config path configured - cannot reload devices")
+        self.clear()
+        self.load_config(self._startup_dir)
+
+    # --- management (delegates to guarneri's ophyd registry) ---
+    def get_device(self, name: str) -> Optional[Any]:
+        """Get a device by its ophyd name, or None if not registered."""
+        return self.devices.find(name=name, allow_none=True)
+
+    def list_devices(self) -> list[str]:
+        """Names of the registered root devices."""
+        return sorted(self.devices.device_names)
+
+    def add_device(self, name: str, device: Any) -> None:
+        """Register an already-instantiated device (keyed by its ophyd name)."""
+        self.devices.register(device)
+
     def remove_device(self, name: str) -> bool:
-        """Remove a device from the registry"""
-        if name in self._devices:
-            del self._devices[name]
-            logger.info(f"Removed device '{name}' from registry")
+        """Remove a device by name. Returns True if it was present."""
+        try:
+            del self.devices[name]
             return True
-        return False
-    
-    def list_devices(self) -> List[str]:
-        """Get list of all device names"""
-        return list(self._devices.keys())
-    
-    def get_device_info(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information about a device"""
-        device = self._devices.get(name)
-        if not device:
+        except (ComponentNotFound, KeyError):
+            return False
+
+    def clear(self) -> None:
+        """Remove all registered devices."""
+        self.devices.clear()
+        self.instrument.unconnected_devices.clear()
+
+    def get_device_info(self, name: str) -> Optional[dict[str, Any]]:
+        """Detailed information about a single device."""
+        device = self.get_device(name)
+        if device is None:
             return None
-        
         info = {
-            "name": name,
+            "name": device.name,
             "type": type(device).__name__,
             "class": f"{type(device).__module__}.{type(device).__name__}",
         }
-        
-        # Add device-specific information
-        if hasattr(device, 'prefix'):
+        if hasattr(device, "prefix"):
             info["prefix"] = device.prefix
-        if hasattr(device, 'connected'):
+        if hasattr(device, "connected"):
             info["connected"] = device.connected
-        if hasattr(device, 'describe'):
+        if hasattr(device, "describe"):
             try:
                 info["description"] = device.describe()
             except Exception as e:
                 info["description_error"] = str(e)
-        
-        # Get current device value
-        if hasattr(device, 'read'):
+        if hasattr(device, "read"):
             try:
                 info["values"] = device.read()
             except Exception as e:
                 info["value_error"] = str(e)
-        
         return info
-    
-    def get_all_device_info(self) -> Dict[str, Dict[str, Any]]:
-        """Get detailed information about all devices"""
-        return {name: self.get_device_info(name) for name in self._devices.keys()}
-    
-    def clear(self) -> None:
-        """Clear all devices from the registry"""
-        count = len(self._devices)
-        self._devices.clear()
-        logger.info(f"Cleared {count} devices from registry")
-    
-    def reload_devices(self) -> None:
-        """Reload devices from the current startup directory"""
-        if self._startup_dir is None:
-            raise ValueError("No startup directory configured - cannot reload devices")
-        
-        self.clear()
-        self.load_startup_files(self._startup_dir)
-    
-    def load_startup_files(self, startup_path: Optional[Union[str, Path]] = None) -> None:
-        """
-        Load Python files from startup directory or single Python file and extract Ophyd devices
-        
-        Args:
-            startup_path: Path to directory containing Python startup files or a single Python file.
-                         If None, uses the configured startup_dir.
-        """
-        if startup_path is None:
-            if self._startup_dir is None:
-                raise ValueError("No startup path provided and no startup directory configured")
-            startup_path = self._startup_dir
-        else:
-            # Update the stored startup dir if a new path is provided
-            self._startup_dir = str(startup_path)
-        
-        path = Path(startup_path)
-        
-        if not path.exists():
-            raise FileNotFoundError(f"Startup path does not exist: {startup_path}")
-        
-        python_files = []
-        sys_path_to_add = None
-        
-        if path.is_file():
-            # Handle single file case
-            if not path.suffix == '.py':
-                raise ValueError(f"Startup file must be a Python file (.py), got: {path.suffix}")
-            python_files = [path]
-            sys_path_to_add = str(path.parent)
-            logger.info(f"Loading devices from single Python file: {startup_path}")
-        elif path.is_dir():
-            # Handle directory case
-            python_files = list(path.glob("*.py"))
-            if not python_files:
-                logger.warning(f"No Python files found in startup directory: {startup_path}")
-                return
-            sys_path_to_add = str(path)
-            logger.info(f"Loading devices from {len(python_files)} Python files in {startup_path}")
-        else:
-            raise ValueError(f"Startup path must be a directory or Python file: {startup_path}")
-        
-        # Add appropriate directory to Python path temporarily
-        sys.path.insert(0, sys_path_to_add)
-        
-        try:
-            for py_file in sorted(python_files):
-                self._load_file(py_file)
-        finally:
-            # Remove directory from Python path
-            if sys_path_to_add in sys.path:
-                sys.path.remove(sys_path_to_add)
-        
-        logger.info(f"Device registry loaded with {len(self._devices)} devices: {list(self._devices.keys())}")
-    
-    def _load_file(self, file_path: Path) -> None:
-        """Load a single Python file and extract Ophyd devices"""
-        try:
-            logger.info(f"Loading startup file: {file_path.name}")
-            
-            # Create module spec and load the module
-            spec = importlib.util.spec_from_file_location(file_path.stem, file_path)
-            if spec is None:
-                raise ImportError(f"Could not create module spec for {file_path}")
-            
-            module = importlib.util.module_from_spec(spec)
-            if module is None:
-                raise ImportError(f"Could not create module from spec for {file_path}")
-            
-            # Execute the module
-            spec.loader.exec_module(module)
-            
-            # Extract Ophyd devices from module namespace
-            devices_found = 0
-            for name, obj in vars(module).items():
-                if self._is_ophyd_device(obj, name):
-                    self.add_device(name, obj)
-                    devices_found += 1
-            
-            logger.info(f"Found {devices_found} devices in {file_path.name}")
-            
-        except Exception as e:
-            logger.error(f"Error loading startup file {file_path}: {str(e)}")
-            raise  # Re-raise to allow caller to handle
-    
-    def _is_ophyd_device(self, obj: Any, name: str) -> bool:
-        """
-        Check if an object is an Ophyd device that should be added to the registry
-        
-        Args:
-            obj: Object to check
-            name: Name of the object in the module namespace
-            
-        Returns:
-            True if object should be added to device registry
-        """
-        # Skip private/magic attributes
-        if name.startswith('_'):
-            return False
-        
-        # Skip imported modules and classes (not instances)
-        if isinstance(obj, type):
-            return False
-        
-        # Check if it's an Ophyd device or signal
-        return isinstance(obj, (Device, EpicsSignal))
+
+    def get_all_device_info(self) -> dict[str, dict]:
+        """Detailed information about all registered devices."""
+        return {name: self.get_device_info(name) for name in self.list_devices()}
 
 
-# Global device registry instance
+# Global device registry instance (empty until loaded).
 device_registry = DeviceRegistry()

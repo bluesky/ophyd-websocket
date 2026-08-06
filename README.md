@@ -52,12 +52,12 @@ OAS_PORT=8001 OAS_HOST=0.0.0.0 uv run python src/ophyd_websocket/server.py
 
 # Using device-socket for Ophyd devices
 ## Startup Directory
-Any use of the device-socket path will require the server to start with a startup directory.
+Any use of the device-socket path requires the server to start with a device config file (a [guarneri](https://github.com/spc-group/guarneri) YAML/TOML file, or a directory of them).
 ```bash
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.yaml
 ```
 
-By default, when the server starts up it will try to instantiate the Ophyd devices. If the startup files change, reload the devices by making a POST request to /api/v1/load-devices.
+The server instantiates and connects the devices on startup. Set `OAS_FAKE_DEVICES=true` to build simulated devices with no EPICS connection. If the config changes, reload the devices by making a POST request to /api/v1/load-devices.
 
 ```bash
 curl -X 'POST' \
@@ -170,8 +170,8 @@ The server provides two different WebSocket endpoints for monitoring and control
 
 | Feature | device-socket | pv-socket |
 |---------|---------------|-----------|
-| **Data Source** | Device registry (requires startup files) | Direct EPICS PV connections |
-| **Configuration** | Requires `--startup-dir` or device loading | No configuration needed |
+| **Data Source** | Device registry (requires a device config file) | Direct EPICS PV connections |
+| **Configuration** | Requires `--startup-dir` (a guarneri config file) | No configuration needed |
 | **Device Types** | Complex Ophyd devices (EpicsMotor, custom devices) | Individual EPICS PVs |
 | **Message Format** | `{"device": "motor1"}` | `{"pv": "IOC:m1"}` |
 | **Metadata** | Full device info including components | Basic PV metadata |
@@ -179,7 +179,7 @@ The server provides two different WebSocket endpoints for monitoring and control
 
 ## Using device-socket for Ophyd Devices
 
-The `/api/v1/device-socket` endpoint works with devices loaded into the device registry from startup files. It supports complex Ophyd devices like EpicsMotor, custom Device classes, and PseudoPositioners.
+The `/api/v1/device-socket` endpoint works with devices loaded into the device registry from a guarneri config file. It supports complex Ophyd devices like EpicsMotor, custom Device classes, and PseudoPositioners.
 
 ### Available Actions
 
@@ -377,7 +377,8 @@ The server can be configured using environment variables or command line argumen
 |-----------|---------------------|---------|-------------|
 | Host | `OAS_HOST` | `localhost` | Server host address |
 | Port | `OAS_PORT` | `8001` | Server port number |
-| Startup Directory | `OAS_STARTUP_DIR` | None | Path to directory containing device definition files |
+| Device config | `OAS_STARTUP_DIR` | None | Path to a guarneri device config file (YAML/TOML), or a directory of them |
+| Fake devices | `OAS_FAKE_DEVICES` | `false` | Build simulated devices (no EPICS) instead of real ones |
 | Require Queue Server | `OAS_REQUIRE_QSERVER` | `false` | Whether queue server safety checks are enforced |
 | Allowed Origins | `OAS_ALLOWED_ORIGINS` | None | Additional CORS origins (comma-separated) |
 | Host | `OAS_LOG_LEVEL` | `INFO` | Log level |
@@ -404,43 +405,38 @@ If you are using EPICS as the underlying controls system, ensure that you have p
 # Using environment variables
 export OAS_HOST=0.0.0.0
 export OAS_PORT=8001
-export OAS_STARTUP_DIR=/path/to/devices
+export OAS_STARTUP_DIR=/path/to/devices.yaml
 export QSERVER_HTTP_SERVER_HOST=queue-server.local
 uv run python src/ophyd_websocket/server.py
 
 # Using command line arguments
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.yaml
 
 # Using both (environment variables take precedence)
-OAS_PORT=8002 uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices
+OAS_PORT=8002 uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.yaml
 ```
 
 ### Device Loading
 
-You can load up predefined Ophyd devices with a POST request to `http://localhost:8001/api/v1/load-devices`.
-
-These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
+Devices are defined in a [guarneri](https://github.com/spc-group/guarneri) config file (YAML or TOML). Pass it to the server with `--startup-dir` — either a single file, or a directory, in which case only files named `devices*` are loaded (matching the BITS naming convention, so non-device configs like `iconfig.yml` or `tiled_config*.yml` in the same directory are ignored):
 
 ```bash
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.yaml
 ```
-Then in your python file instantiate your Ophyd devices, which will then be available when making API calls or websocket subscriptions to devices.
+The devices are instantiated and connected on startup. To reload after editing the config, POST to `http://localhost:8001/api/v1/load-devices`.
 
-```python
-#/path/to/devices.py
-from ophyd import EpicsSignal, EpicsMotor, Device, Component
+Each top-level key is a dotted import path to an Ophyd class (or a factory); guarneri imports it dynamically. Each list item is the keyword arguments for that class. Devices are looked up by their `name`. Set `OAS_FAKE_DEVICES=true` to simulate them without EPICS.
 
-# Simple EPICS signals - these will be detected and added to registry
-sim_motor1 = EpicsSignal("IOC:m1", name="motor1")
-sim_motor2 = EpicsMotor("IOC:m2", name="motor2")
-# Custom Ophyd Device class
-class SimpleMotor(Device):
-    """A simple motor device with position and velocity"""
-    m1 = Component(EpicsSignal, "m1")
-    m2 = Component(EpicsSignal, "m2")
+```yaml
+# /path/to/devices.yaml
+ophyd.EpicsSignal:
+  - {name: motor1, read_pv: "IOC:m1"}
+  - {name: detector_counts, read_pv: "IOC:detector:counts"}
 
-sim_motor_device = SimpleMotor("IOC:", name="sim_motor_device")
+ophyd.EpicsMotor:
+  - {name: motor2, prefix: "IOC:m2:"}
 ```
+For a custom Device class, use its dotted import path as the key (it must be importable), e.g. `my_package.devices.MyDetector:`.
 
 
 ## Stream Queue Server Console Output
