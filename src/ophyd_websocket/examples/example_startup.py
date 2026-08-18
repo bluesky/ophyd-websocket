@@ -8,7 +8,11 @@ Any Ophyd Device or EpicsSignal instances defined at module level will be
 automatically detected and added to the registry.
 """
 
+import logging
+
 from ophyd import EpicsSignal, EpicsMotor, Device, Component
+
+logger = logging.getLogger(__name__)
 
 # Simple EPICS signals - these will be detected and added to registry
 sim_motor1 = EpicsSignal("IOC:m1", name="motor1")
@@ -37,9 +41,9 @@ class AnotherDevice(Device):
 # This will NOT be detected (starts with underscore)
 _private_signal = EpicsSignal("IOC:private", name="private")
 
-print("Example startup file loaded - devices defined:")
-print("- motor1, motor2, detector_counts (EpicsSignals)")
-print("- sample_motor, scan_motor (SimpleMotor devices)")
+logger.info("Example startup file loaded - devices defined")
+logger.info("Example startup file loaded: motor1, motor2, detector_counts (EpicsSignals)")
+logger.info("Example startup file loaded: sample_motor, scan_motor (SimpleMotor devices)")
 
 from ophyd.sim import hw
 

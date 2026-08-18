@@ -232,7 +232,7 @@ class SharedCameraWorker:
         except Exception:
             return
 
-        print(updated)
+        logger.debug("Camera shared socket settings updated: %s", updated)
         self.latest_settings = updated
         self.settings_version += 1
         asyncio.create_task(self._notify_update())
@@ -244,7 +244,7 @@ class SharedCameraWorker:
 
     async def _process_latest_frames(self):
         while self.pending_raw_frame is not None:
-            print("Processing new frame")
+            logger.debug("Processing new frame")
             raw = self.pending_raw_frame
             self.pending_raw_frame = None
             settings = self.latest_settings
