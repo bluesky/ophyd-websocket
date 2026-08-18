@@ -166,14 +166,20 @@ async def lifespan(app: FastAPI):
     
     if startup_dir:
         logger.info(f"[LIFESPAN] Setting startup directory in device registry: {startup_dir}")
-        device_registry.set_startup_dir(startup_dir)
+        device_registry.set_startup_dir(startup_dir, auto_load=True)
+        loaded_devices = device_registry.list_devices()
+        logger.info(f"[LIFESPAN] Auto-loaded devices from startup directory: {loaded_devices}")
+        if loaded_devices:
+            logger.info(f"[LIFESPAN] Device names loaded: {', '.join(loaded_devices)}")
+        else:
+            logger.warning("[LIFESPAN] No devices were loaded from startup directory")
     else:
         logger.info("[LIFESPAN] No startup directory found in environment")
     
     # Verify the startup directory is properly set
     stored_dir = device_registry.get_startup_dir()
     logger.info(f"[LIFESPAN] Final startup directory in registry: {stored_dir}")
-    logger.info("[LIFESPAN] Server ready - use /load-devices endpoint to load devices")
+    logger.info("[LIFESPAN] Server startup complete; devices are loaded")
     
     yield
     

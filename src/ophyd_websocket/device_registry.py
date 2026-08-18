@@ -51,7 +51,7 @@ class DeviceRegistry:
         """Get the current startup directory or file path (read-only property)"""
         return self._startup_dir
     
-    def set_startup_dir(self, startup_path: Union[str, Path], auto_load: bool = False) -> None:
+    def set_startup_dir(self, startup_path: Union[str, Path], auto_load: bool = True) -> None:
         """
         Set the startup directory or file for device loading
         
