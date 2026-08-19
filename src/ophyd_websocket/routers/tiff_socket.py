@@ -1,12 +1,14 @@
 import asyncio
+import contextlib
 import json
 import time
 import numpy as np
 import io
-import base64
 import os
 import gc
 import logging
+from dataclasses import dataclass, field
+from typing import Any
 from PIL import Image
 
 from ophyd import EpicsSignalRO
@@ -16,7 +18,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 logger = logging.getLogger(__name__)
 
 max_dimension = 2500 #maximum pixel width or height to be sent out. Increase if higher fidelity is needed
-use_log_normalization = True  # Default to True
 
 def convert_byte_array_to_string(byte_array):
     """Convert numpy byte array or list of ASCII values to string"""
@@ -45,62 +46,213 @@ def convert_byte_array_to_string(byte_array):
 
 
 router = APIRouter()
+_workers: dict[str, "SharedTiffWorker"] = {}
+_workers_lock = asyncio.Lock()
+
+
+@dataclass
+class SharedTiffWorker:
+    """Holds the most recent decoded TIFF frame per unique detector (file-path PV).
+
+    Multiple websocket subscribers share a single worker so a given TIFF file is
+    only decoded once regardless of how many clients are connected.
+    """
+    worker_key: str
+    file_path_pv: str
+    loop: asyncio.AbstractEventLoop
+    path_signal: Any | None = None
+    path_sub_id: Any | None = None
+    sockets: set[WebSocket] = field(default_factory=set)
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    latest_frame: bytes | None = None
+    frame_version: int = 0
+    use_log_normalization: bool = True
+    pending_file_path: str | None = None
+    last_file_path: str | None = None
+    processing_task: asyncio.Task | None = None
+
+    async def start(self) -> tuple[bool, str | None]:
+        try:
+            logger.debug("About to call EpicsSignal for TIFF file path")
+            self.path_signal = EpicsSignalRO(self.file_path_pv, name='path_signal')
+            self.path_signal.get()
+            logger.debug("Get call complete")
+        except Exception as e:
+            logger.exception("Error initializing file path signal")
+            return False, str(e)
+
+        if not self.path_signal.connected:
+            logger.info("TIFF file path PV not connected, exiting: %s", self.file_path_pv)
+            return False, f"The {self.file_path_pv} pv could not connect"
+
+        def path_cb(value, timestamp, **kwargs):
+            file_path_str = convert_byte_array_to_string(value)
+            logger.debug("File path updated: %s at %s", file_path_str, timestamp)
+            self.loop.call_soon_threadsafe(self._enqueue_file_path, file_path_str)
+
+        self.path_sub_id = self.path_signal.subscribe(path_cb)
+
+        # Load and enqueue the current file if it exists
+        try:
+            current_path = self.path_signal.get()
+            if current_path is not None and len(current_path) > 0:
+                current_path_str = convert_byte_array_to_string(current_path)
+                logger.debug("Current file path: %s", current_path_str)
+                if current_path_str and current_path_str.strip():
+                    self._enqueue_file_path(current_path_str)
+        except Exception:
+            logger.exception("Error reading initial TIFF file path")
+
+        return True, None
+
+    async def stop(self):
+        if self.path_signal is not None and self.path_sub_id is not None:
+            try:
+                self.path_signal.clear_sub(self.path_sub_id)
+            except Exception:
+                pass
+
+        if self.processing_task is not None:
+            self.processing_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.processing_task
+            self.processing_task = None
+
+        async with self.condition:
+            self.condition.notify_all()
+
+    def _enqueue_file_path(self, file_path: str):
+        self.pending_file_path = file_path
+        self.last_file_path = file_path
+        if self.processing_task is None or self.processing_task.done():
+            self.processing_task = asyncio.create_task(self._process_latest_files())
+
+    def reprocess_current(self):
+        """Re-decode the most recent file, e.g. after a normalization toggle."""
+        if self.last_file_path is not None:
+            self._enqueue_file_path(self.last_file_path)
+
+    async def _process_latest_files(self):
+        while self.pending_file_path is not None:
+            file_path = self.pending_file_path
+            self.pending_file_path = None
+
+            result = await asyncio.to_thread(
+                load_and_process_tiff, file_path, self.use_log_normalization
+            )
+            if isinstance(result, Exception):
+                logger.info("Skipping TIFF image due to processing error: %s", result)
+                continue
+
+            self.latest_frame = result.getvalue()
+            self.frame_version += 1
+            await self._notify_update()
+
+    async def _notify_update(self):
+        async with self.condition:
+            self.condition.notify_all()
+
+
+async def get_or_create_worker(file_path_pv: str):
+    async with _workers_lock:
+        worker = _workers.get(file_path_pv)
+        if worker is not None:
+            return worker, None
+
+        worker = SharedTiffWorker(
+            worker_key=file_path_pv,
+            file_path_pv=file_path_pv,
+            loop=asyncio.get_running_loop(),
+        )
+        ok, error = await worker.start()
+        if not ok:
+            return None, error
+        _workers[file_path_pv] = worker
+        return worker, None
+
+
+async def cleanup_worker_if_unused(worker: SharedTiffWorker):
+    async with _workers_lock:
+        if worker.sockets:
+            return
+        existing = _workers.get(worker.worker_key)
+        if existing is not worker:
+            return
+        await worker.stop()
+        _workers.pop(worker.worker_key, None)
 
 
 @router.websocket("/tiff-socket")
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
-    buffer = asyncio.Queue(maxsize=1000)
     file_path_pv = await initialize_settings(websocket)
+    if file_path_pv is None:
+        return
 
-    def file_path_cb(value, timestamp, **kwargs):
-        # Convert byte array to string
-        file_path_str = convert_byte_array_to_string(value)
-        logger.debug("File path updated: %s at %s", file_path_str, timestamp)
-
-        if os.path.exists(file_path_str):
-            try:
-                file_size = os.path.getsize(file_path_str)
-                logger.debug("File exists, size: %s bytes", file_size)
-            except OSError as e:
-                logger.debug("File exists but error getting size: %s", e)
-        else:
-            logger.debug("File does not exist yet: %s", file_path_str)
-
-        if buffer.qsize() >= buffer.maxsize:
-            buffer.get_nowait()
-        try:
-            buffer.put_nowait((file_path_str, timestamp))
-        except asyncio.QueueFull:
-            logger.debug("Buffer full, dropping file path update")
-
-    try:
-        logger.debug("About to call EPicsSignal for TIFF file path")
-        path_signal = EpicsSignalRO(file_path_pv, name='path_signal')
-        logger.debug("Calling get on path signal")
-        path_signal.get()
-        logger.debug("Get call complete")
-    except Exception as e:
-        logger.exception("Error initializing file path signal")
-        await websocket.send_text(json.dumps({'error': str(e)}))
+    worker, error = await get_or_create_worker(file_path_pv)
+    if worker is None:
+        await websocket.send_text(json.dumps({'error': str(error)}))
         await websocket.close()
         return
 
-    if not await check_signal_connection(path_signal, file_path_pv, websocket):
-        return
-    path_signal.subscribe(file_path_cb)
+    worker.sockets.add(websocket)
 
-    # Load and send the current file if it exists
-    current_path = path_signal.get()
-    if current_path is not None and len(current_path) > 0:
-        # Convert current path from byte array to string
-        current_path_str = convert_byte_array_to_string(current_path)
-        logger.debug("Current file path: %s", current_path_str)
-        if current_path_str and current_path_str.strip():
-            buffer.put_nowait((current_path_str, time.time()))
+    async def sender_loop():
+        # Initialise to current version so wait_for only triggers on FUTURE changes.
+        last_frame_version = worker.frame_version
 
-    await handle_streaming(websocket, buffer)
+        if worker.latest_frame is not None:
+            await websocket.send_bytes(worker.latest_frame)
+
+        while True:
+            async with worker.condition:
+                await worker.condition.wait_for(
+                    lambda: worker.frame_version != last_frame_version
+                )
+
+            if worker.frame_version != last_frame_version and worker.latest_frame is not None:
+                last_frame_version = worker.frame_version
+                await websocket.send_bytes(worker.latest_frame)
+
+    async def receiver_loop():
+        while True:
+            message = await websocket.receive_text()
+            data = json.loads(message)
+            if "toggleLogNormalization" in data:
+                worker.use_log_normalization = bool(data["toggleLogNormalization"])
+                logger.info("TIFF socket log normalization toggled to: %s", worker.use_log_normalization)
+                await websocket.send_text(json.dumps({"logNormalization": worker.use_log_normalization}))
+                # Re-decode the current file so the toggle is reflected immediately.
+                worker.reprocess_current()
+
+    sender_task = asyncio.create_task(sender_loop())
+    receiver_task = asyncio.create_task(receiver_loop())
+
+    try:
+        done, pending = await asyncio.wait(
+            {sender_task, receiver_task},
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        for task in done:
+            exc = task.exception()
+            if exc is None:
+                continue
+            if isinstance(exc, WebSocketDisconnect):
+                break
+            await websocket.send_text(json.dumps({'error': str(exc)}))
+            break
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    except WebSocketDisconnect:
+        pass
+    finally:
+        worker.sockets.discard(websocket)
+        with contextlib.suppress(Exception):
+            await websocket.close()
+        await cleanup_worker_if_unused(worker)
 
 # Setup and initialization functions
 
@@ -108,7 +260,7 @@ async def initialize_settings(websocket):
     try:
         data = await websocket.receive_text()
         message = json.loads(data)
-        
+
         # Get prefix from user or use default
         prefix = message.get("prefix", "13PIL1")
         file_path_pv = f"{prefix}:TIFF1:FullFileName_RBV"
@@ -121,59 +273,14 @@ async def initialize_settings(websocket):
         await websocket.close()
         return None
 
-async def check_signal_connection(signal, name, websocket):
-    if not signal.connected:
-        logger.info("TIFF file path PV not connected, exiting: %s", name)
-        await websocket.send_text(json.dumps({'error': f"The {name} pv could not connect"}))
-        await websocket.close()
-        return False
-    return True
-
-# Main loop for streaming images
-async def handle_streaming(websocket, buffer):
-    global use_log_normalization  # Use the global variable to toggle normalization
-    try:
-        # Start a background task to listen for client messages
-        async def listen_for_client_messages():
-            global use_log_normalization
-            while True:
-                try:
-                    message = await websocket.receive_text()
-                    data = json.loads(message)
-                    if "toggleLogNormalization" in data:
-                        use_log_normalization = data["toggleLogNormalization"]
-                        logger.info("TIFF socket log normalization toggled to: %s", use_log_normalization)
-                        await websocket.send_text(json.dumps({"logNormalization": use_log_normalization}))
-                except WebSocketDisconnect:
-                    break
-                except Exception as e:
-                    logger.exception("Error processing TIFF client message")
-
-        # Run the listener in the background
-        asyncio.create_task(listen_for_client_messages())
-
-        while True:
-            file_path, timestamp = await buffer.get()
-
-            # Load and process the image file
-            bufferedResult = await asyncio.to_thread(load_and_process_tiff, file_path)
-            if isinstance(bufferedResult, Exception):
-                logger.info("Skipping TIFF image due to processing error: %s", bufferedResult)
-                continue
-            else:
-                await websocket.send_bytes(bufferedResult.getvalue())
-
-    except WebSocketDisconnect:
-        await websocket.close()
-
-def load_and_process_tiff(file_path):
+def load_and_process_tiff(file_path, use_log_normalization):
     logger.debug("Loading TIFF file: %s", file_path)
     """Load a TIFF file and process it with the same formatting as the original code"""
     try:
         # Check if file exists with retry mechanism
         max_retries = 2  # Increase retries
         retry_delay = 0.5  # Half second delay
-        
+
         for attempt in range(max_retries + 1):
             # Check both existence and readability
             if os.path.exists(file_path) and os.access(file_path, os.R_OK):
@@ -184,13 +291,13 @@ def load_and_process_tiff(file_path):
                         break
                 except OSError:
                     pass  # File might still be being written
-            
+
             if attempt < max_retries:
                 logger.debug("TIFF file not ready, retrying in %s seconds... (attempt %s/%s)", retry_delay, attempt + 1, max_retries + 1)
                 time.sleep(retry_delay)
             else:
                 raise FileNotFoundError(f"File not accessible after {max_retries + 1} attempts: {file_path}")
-        
+
         # Load the TIFF file using PIL with explicit file handle management
         img = None
         try:
@@ -225,11 +332,11 @@ def load_and_process_tiff(file_path):
                     except:
                         pass
                 raise retry_error
-        
+
         # Ensure we have a numpy array
         if not isinstance(array_data, np.ndarray):
             raise ValueError("Failed to load image as numpy array")
-        
+
         # Get dimensions and color mode directly from the array shape
         if len(array_data.shape) == 2:
             # Grayscale image
@@ -252,33 +359,31 @@ def load_and_process_tiff(file_path):
                 colorMode = 'Mono'
         else:
             raise ValueError(f"Unsupported image shape: {array_data.shape}")
-        
+
         logger.debug("Loaded TIFF: %s, Shape: %s, Type: %s, ColorMode: %s", file_path, array_data.shape, array_data.dtype, colorMode)
 
         logger.debug("TIFF data range: min=%s, max=%s", array_data.min(), array_data.max())
         negative_count = np.sum(array_data < 0)
         if negative_count > 0:
             logger.debug("Found %s negative pixels (will be set to black)", negative_count)
-        
+
         # Use the same processing as the original code
-        result = get_buffer_from_array(array_data, height, width, colorMode)
-        
+        result = get_buffer_from_array(array_data, height, width, colorMode, use_log_normalization)
+
         # Force garbage collection to ensure all file handles are released
         gc.collect()
-        
+
         return result
-        
+
     except Exception as e:
         logger.exception("Error loading TIFF file %s", file_path)
         return e
 
-def normalize_array_data(array_data):
-    global use_log_normalization
-
+def normalize_array_data(array_data, use_log_normalization):
     # Handle negative values (invalid pixels) by setting them to 0
     # Create a mask for invalid pixels (values < 0, typically -1)
     invalid_mask = array_data < 0
-    
+
     # Replace negative values with 0 for processing
     array_data_clean = array_data.copy()
     array_data_clean[invalid_mask] = 0
@@ -298,10 +403,10 @@ def normalize_array_data(array_data):
         except Exception as e:
             logger.exception("Error during linear normalization")
             array_data_normalized = array_data_clean.astype(np.uint8)
-    
+
     # Set invalid pixels to black (0) in the final image
     array_data_normalized[invalid_mask] = 0
-    
+
     return array_data_normalized
 
 
@@ -326,7 +431,7 @@ def log_normalize_to_255(data: np.ndarray) -> np.ndarray:
     # Normalize to 0–255
     log_min = np.min(log_data[nonzero_mask]) if np.any(nonzero_mask) else 0
     log_max = np.max(log_data[nonzero_mask]) if np.any(nonzero_mask) else 1
-    
+
     if log_max == log_min:
         normalized = np.zeros_like(log_data)
     else:
@@ -357,13 +462,13 @@ def reshape_array(array_data, height, width, colorMode):
         mode = 'RGB'
     else:
         raise ValueError(f"Unsupported color mode: {colorMode}")
-    
+
     return reshaped_data, mode
 
-def get_buffer_from_array(array_data, height, width, colorMode):
+def get_buffer_from_array(array_data, height, width, colorMode, use_log_normalization):
     try:
         # Normalize the array data
-        array_data = normalize_array_data(array_data)
+        array_data = normalize_array_data(array_data, use_log_normalization)
         array_data, mode = reshape_array(array_data, height, width, colorMode)
     except Exception as e:
         logger.exception("Error formatting TIFF array data")
