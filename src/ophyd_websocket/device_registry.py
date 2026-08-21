@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from ophyd import Device, EpicsSignal
+from ophyd.signal import EpicsSignalBase
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class DeviceRegistry:
     
     def add_device(self, name: str, device: Device) -> None:
         """Add a device to the registry"""
-        if not isinstance(device, (Device, EpicsSignal)):
+        if not isinstance(device, (Device, EpicsSignalBase)):
             raise ValueError(f"Device {name} must be an Ophyd Device or EpicsSignal, got {type(device)}")
         
         if name in self._devices:
@@ -255,8 +256,9 @@ class DeviceRegistry:
         if isinstance(obj, type):
             return False
         
-        # Check if it's an Ophyd device or signal
-        return isinstance(obj, (Device, EpicsSignal))
+        # Check if it's an Ophyd device or signal (EpicsSignalBase covers
+        # both EpicsSignal and the read-only EpicsSignalRO)
+        return isinstance(obj, (Device, EpicsSignalBase))
 
 
 # Global device registry instance
