@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ophyd_websocket.routers.pv_socket import router as pv_socket_router
 from ophyd_websocket.routers.camera_socket import router as camera_socket_router
 from ophyd_websocket.routers.camera_shared_socket import router as camera_shared_socket_router
+from ophyd_websocket.routers.tiff_socket import router as tiff_socket_router
 from ophyd_websocket.routers.qs_console_socket import router as qs_console_socket_router
 from ophyd_websocket.routers.core_api import router as core_api_router
 from ophyd_websocket.routers.device_socket import router as device_socket_router
@@ -249,6 +250,7 @@ app.add_middleware(
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(camera_shared_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(tiff_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router, prefix="/api/v1")
@@ -287,6 +289,17 @@ def list_websockets():
                 "example_url": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
                 "format": "Binary JPEG images"
             },
+            "tiff_socket": {
+                "endpoint": "/api/v1/tiff-socket",
+                "description": "Streams a detector's most recently saved TIFF file, re-decoded whenever "
+                               "<prefix>:TIFF1:FullFileName_RBV changes",
+                "example_url": f"{BASE_WS_URL}/api/v1/tiff-socket",
+                "format": "Binary JPEG images",
+                "example_messages": {
+                    "init_example": {"prefix": "SIMTIFF1"},
+                    "toggle_log_example": {"toggleLogNormalization": True}
+                }
+            },
             "qs_console_socket": {
                 "endpoint": "/api/v1/qs-console-socket",
                 "description": "Queue server console output",
@@ -319,6 +332,7 @@ def read_root():
                 "pv_socket": f"{BASE_WS_URL}/api/v1/pv-socket",
                 "camera_socket": f"{BASE_WS_URL}/api/v1/camera-socket",
                 "camera_socket_shared": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
+                "tiff_socket": f"{BASE_WS_URL}/api/v1/tiff-socket",
                 "qs_console_socket": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },
