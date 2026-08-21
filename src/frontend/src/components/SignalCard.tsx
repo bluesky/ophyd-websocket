@@ -87,10 +87,15 @@ export default function SignalCard({
       </div>
 
       <p className="mt-3 flex items-baseline gap-1.5">
-        <span className="font-mono text-2xl tabular-nums text-slate-900">
+        {/* Long values (e.g. a TIFF file path) scroll horizontally inside the
+            card rather than overflowing it. */}
+        <span
+          className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-2xl
+            tabular-nums text-slate-900"
+        >
           {formatValue(displayValue, signal?.precision)}
         </span>
-        {signal?.units && <span className="text-sm text-slate-500">{signal.units}</span>}
+        {signal?.units && <span className="shrink-0 text-sm text-slate-500">{signal.units}</span>}
       </p>
 
       {/* EPICS reports 0/0 for "no limits configured"; don't render that. */}
