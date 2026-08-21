@@ -48,6 +48,46 @@ Ports: frontend `5173`, ophyd-websocket `8001`, IOC Channel Access `5064`.
 Access is port-sensitive and `caproto-ioc` already owns 5064 on the host.
 
 
+# Running each service natively (no docker)
+
+Sometimes it's easier to run the stack straight on your machine — e.g. to watch
+the ophyd-websocket traceback live when it crashes under load. Run each of these
+in its own terminal from the repo root.
+
+All three caproto IOCs share UDP 5064 for name searches (`SO_REUSEPORT`), so the
+default broadcast Channel Access resolution finds all of them at once — no
+`EPICS_CA_ADDR_LIST` needed. The one exception is `EPICS_CA_MAX_ARRAY_BYTES`:
+the camera's `image1:ArrayData` waveform is larger than CA's legacy default, so
+export it before starting ophyd-websocket or camera frames never arrive.
+
+```bash
+# 1. Simulated IOC (SIM:* PVs)
+uv run python caproto/sim_ioc.py --list-pvs
+```
+```bash
+# 2. Simulated areaDetector (SIMDET1:* PVs) — the camera stream
+uv run python caproto/sim_detector_ioc.py --list-pvs
+```
+```bash
+# 3. Simulated TIFF-writer (SIMTIFF1:* PVs) — the /tiff-socket stream
+uv run python caproto/sim_tiff_detector_ioc.py --list-pvs
+```
+```bash
+# 4. ophyd-websocket (port 8001). The large-array cap is required for the
+#    camera; the TIFF path reads files from disk and does not need it.
+EPICS_CA_MAX_ARRAY_BYTES=10000000 uv run ophyd-websocket --startup-dir startup
+```
+```bash
+# 5. Frontend dev server (port 5173) — open http://localhost:5173
+cd src/frontend && npm install && npm run dev
+```
+
+The TIFF IOC writes absolute paths under `caproto/assets` into
+`SIMTIFF1:TIFF1:FullFileName_RBV`, and ophyd-websocket opens those same paths on
+the local filesystem, so running natively from the repo root just works. Set
+`SIM_TIFF_ASSETS_DIR` only if you move the sample TIFFs elsewhere.
+
+
 ## The simulated IOC
 
 `caproto/sim_ioc.py` is a caproto `PVGroup`. caproto is a dev dependency of
