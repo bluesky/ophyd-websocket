@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import io
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ophyd import EpicsSignalRO
 
 from .camera_socket import initialize_settings, update_enum_lists
+
+logger = logging.getLogger(__name__)
 
 
 dtype_map = {
