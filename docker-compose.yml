@@ -1,8 +1,9 @@
 # Full local test stack:
 #
-#   caproto-ioc  -- simulated EPICS IOC serving SIM:* PVs
-#   ophyd-websocket -- FastAPI/WebSocket server, loads ophyd devices from ./startup
-#   frontend     -- Vite dev server with a minimal SPA driven by finch hooks
+#   caproto-ioc      -- simulated EPICS IOC serving SIM:* PVs
+#   caproto-detector -- simulated areaDetector serving SIMDET1:* PVs
+#   ophyd-websocket  -- FastAPI/WebSocket server, loads ophyd devices from ./startup
+#   frontend         -- Vite dev server with a minimal SPA driven by finch hooks
 #
 #   docker compose up --build
 #   open http://localhost:5173
@@ -27,6 +28,19 @@ services:
     networks:
       - beamline
 
+  caproto-detector:
+    build:
+      context: .
+      dockerfile: caproto/Dockerfile
+    container_name: caproto-detector
+    environment:
+      SIM_IOC_SCRIPT: "caproto/sim_detector_ioc.py"
+      SIM_PV_PREFIX: "SIMDET1:"
+    # Deliberately not published to the host: Channel Access is port-sensitive
+    # and caproto-ioc already owns 5064 there. Reach it from inside the network.
+    networks:
+      - beamline
+
   ophyd-websocket:
     build:
       context: .
@@ -34,6 +48,7 @@ services:
     container_name: ophyd-websocket
     depends_on:
       - caproto-ioc
+      - caproto-detector
     command: ["uv", "run", "python", "src/ophyd_websocket/server.py", "--startup-dir", "/startup"]
     environment:
       OAS_HOST: "0.0.0.0"
@@ -41,11 +56,12 @@ services:
       OAS_LOG_LEVEL: "INFO"
       OAS_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
       OAS_REQUIRE_QSERVER: "false"
-      # Unicast CA searches straight at the IOC container.
-      EPICS_CA_ADDR_LIST: "caproto-ioc"
+      # Unicast CA searches straight at the IOC containers (space separated).
+      EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector"
       EPICS_CA_AUTO_ADDR_LIST: "NO"
       EPICS_CA_MAX_ARRAY_BYTES: "10000000"
       SIM_PV_PREFIX: "SIM:"
+      SIM_DETECTOR_PV_PREFIX: "SIMDET1:"
     volumes:
       # Live-editable ophyd device definitions.
       - ./startup:/startup:ro
@@ -61,10 +77,14 @@ services:
     container_name: ophyd-frontend
     depends_on:
       - ophyd-websocket
-    environment:
-      # Read by the browser, so this must be reachable from the host, not the
-      # docker network. The SPA derives the ws:// URL from it.
-      VITE_OPHYD_API_URL: "http://localhost:8001/api/v1"
+    # No VITE_OPHYD_API_URL by default: the SPA falls back to
+    # `http://<the host you loaded the page from>:8001/api/v1`, so it works
+    # unchanged whether you browse to localhost:5173 or straight to the VM's
+    # address (colima prints one via `colima status`; handy when the localhost
+    # port forwarder wedges). Set it explicitly only to point the SPA at an
+    # ophyd-websocket running somewhere else entirely.
+    # environment:
+    #   VITE_OPHYD_API_URL: "http://localhost:8001/api/v1"
     volumes:
       - ./src/frontend/src:/app/src:ro
       - ./src/frontend/index.html:/app/index.html:ro

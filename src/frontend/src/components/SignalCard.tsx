@@ -25,6 +25,8 @@ export interface SignalCardProps {
   signal: LiveSignal | undefined
   onSet: (name: string, value: string) => void
   onRemove: (name: string) => void
+  /** Hide the unsubscribe button for cards that are part of a fixed panel. */
+  removable?: boolean
 }
 
 /**
@@ -32,7 +34,13 @@ export interface SignalCardProps {
  * Shared by the device socket and the arbitrary-PV socket, since the finch
  * hooks hand back the same shape for both.
  */
-export default function SignalCard({ name, signal, onSet, onRemove }: SignalCardProps) {
+export default function SignalCard({
+  name,
+  signal,
+  onSet,
+  onRemove,
+  removable = true,
+}: SignalCardProps) {
   const [draft, setDraft] = useState('')
 
   const connected = signal?.connected ?? false
@@ -65,14 +73,16 @@ export default function SignalCard({ name, signal, onSet, onRemove }: SignalCard
             title={connected ? 'connected' : 'disconnected'}
             className={`h-2.5 w-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-300'}`}
           />
-          <button
-            type="button"
-            onClick={() => onRemove(name)}
-            className="rounded px-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-            aria-label={`Unsubscribe from ${name}`}
-          >
-            ✕
-          </button>
+          {removable && (
+            <button
+              type="button"
+              onClick={() => onRemove(name)}
+              className="rounded px-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              aria-label={`Unsubscribe from ${name}`}
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 

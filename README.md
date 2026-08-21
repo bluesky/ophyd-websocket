@@ -26,7 +26,8 @@ real beamline. Three services:
 | Service | What it is | Where |
 | --- | --- | --- |
 | `caproto-ioc` | Simulated EPICS IOC serving `SIM:*` PVs | `caproto/sim_ioc.py` |
-| `ophyd-websocket` | This server, with ophyd devices wrapping those PVs | `startup/sim_devices.py` |
+| `caproto-detector` | Simulated areaDetector serving `SIMDET1:*` PVs | `caproto/sim_detector_ioc.py` |
+| `ophyd-websocket` | This server, with ophyd devices wrapping those PVs | `startup/` |
 | `frontend` | Minimal React/Tailwind SPA driven by the finch hooks | `src/frontend/` |
 
 ```bash
@@ -35,6 +36,46 @@ open http://localhost:5173
 ```
 
 Ports: frontend `5173`, ophyd-websocket `8001`, IOC Channel Access `5064`.
+`caproto-detector` is reachable only from inside the compose network — Channel
+Access is port-sensitive and `caproto-ioc` already owns 5064 on the host.
+
+### If `localhost:5173` hangs (colima / Docker Desktop on macOS)
+
+Symptom: the browser spins forever on `localhost:5173` or `localhost:8001`,
+`docker compose ps` shows everything `Up`, and the containers answer fine from
+the inside. That is the VM's **localhost port forwarder** wedging, not this
+stack. It accepts the TCP connection and then forwards nothing, so requests
+hang rather than getting refused.
+
+Confirm it in two commands:
+
+```bash
+docker compose exec frontend node -e "require('http').get('http://127.0.0.1:5173/',r=>console.log(r.statusCode))"
+curl -m 5 -o /dev/null -w '%{http_code}\n' http://localhost:5173/
+```
+
+A `200` from inside plus a hang from outside means the forwarder is the
+problem.
+
+**Work around it by skipping the forwarder entirely.** colima gives the VM a
+routable address:
+
+```bash
+colima status          # e.g. address: 192.168.64.2
+open http://192.168.64.2:5173
+```
+
+The SPA derives its API URL from whatever host you loaded the page from, so
+browsing to the VM address just works — nothing to reconfigure. `colima restart`
+also clears the wedge, but it tends to come back under sustained websocket
+traffic.
+
+The VM defaults are also tight for this stack (colima ships 2 CPUs / 2 GiB, and
+the ophyd-websocket container runs emulated — see below). If you hit this a lot:
+
+```bash
+colima stop && colima start --cpu 4 --memory 8
+```
 
 ## The simulated IOC
 
@@ -57,6 +98,43 @@ Run it standalone (outside docker) with:
 uv run python caproto/sim_ioc.py --list-pvs
 ```
 
+## The simulated areaDetector
+
+`caproto/sim_detector_ioc.py` mimics the slice of ADSimDetector that the camera
+path actually touches: a `cam1:` driver group and an `image1:` array plugin
+under the `SIMDET1:` prefix.
+
+| PVs | Behavior |
+| --- | --- |
+| `SIMDET1:image1:ArrayData` | The frame buffer: an 8-bit CA waveform, regenerated live |
+| `cam1:Acquire`, `AcquireTime`, `AcquirePeriod` | Start/stop, exposure (scales brightness), and frame interval |
+| `cam1:ImageMode`, `NumImages`, `NumImagesCounter_RBV` | `Single` stops after one frame, `Multiple` after `NumImages`, `Continuous` free-runs (the default) |
+| `cam1:SimMode` | `Peaks` (drifting gaussian spots inside a breathing ring), `LinearRamp`, `Sine`, `Offset&Noise` |
+| `cam1:ColorMode` | `Mono`, `RGB1`, `RGB2`, `RGB3` — all four layouts are genuinely produced, not just advertised |
+| `cam1:MinX/MinY/SizeX/SizeY` | ROI crop; see the caveat below |
+| `cam1:GainRed/Green/Blue`, `Gain`, `Noise` | Per-channel gain (defaulted to 1.0/0.7/0.4 so RGB modes look tinted) and noise amplitude |
+| `cam1:ArrayCounter_RBV`, `ArrayRate_RBV`, `DetectorState_RBV` | Frame count, rolling frame rate, detector state |
+
+Defaults: 256×256 Mono at ~5 Hz, free-running — deliberately modest, see the
+platform note below. `MaxSizeX/Y_RBV` is 512, so you can raise `SizeX`/`SizeY`
+and lower `AcquirePeriod` at runtime.
+
+Two deliberate departures from real areaDetector:
+
+- **`DataType` is read-only at `UInt8`.** The `ArrayData` channel is an 8-bit CA
+  waveform, so the data type is not something the IOC can change at runtime.
+  Advertising `UInt16` would just produce garbage frames.
+- **`SizeX`/`SizeY` are the ROI's far edge, not its extent.** The camera socket
+  computes the frame width as `SizeX - MinX`, so the IOC uses the same
+  convention. Otherwise a non-zero `MinX` would desync the array length from
+  the decoded dimensions and every frame would be dropped.
+
+Run it standalone with:
+
+```bash
+uv run python caproto/sim_detector_ioc.py --list-pvs
+```
+
 ## The ophyd devices
 
 `startup/sim_devices.py` is mounted at `/startup` and loaded via
@@ -66,6 +144,11 @@ handful of flat signals (`ring_current`, `photon_energy`, `shutter`,
 `detector_counts`, …) — 17 registry entries in total. The PV prefix comes from
 `SIM_PV_PREFIX` (default `SIM:`), so the same file works against a locally run
 IOC.
+
+`startup/sim_detector_devices.py` adds the detector's control and status
+signals (`sim_camera`, `camera_acquire`, `camera_frame_rate`, …). It
+deliberately omits `image1:ArrayData` — a 256 kB waveform per frame belongs on
+the dedicated camera stream, not on the per-signal `/device-socket` fan-out.
 
 Because the directory is bind-mounted, editing it and calling
 `POST /api/v1/load-devices` reloads the registry without a restart.
@@ -79,6 +162,13 @@ finch hooks:
   sidebar lists whatever `GET /api/v1/devices` returns; click to subscribe.
 - `useOphydPVSocket` — arbitrary PV names over `/api/v1/pv-socket`. Type any PV
   into the sidebar form.
+
+The camera section on top renders finch's `CameraCanvas` pointed at the
+`SIMDET1` prefix. The canvas opens its own `/api/v1/camera-socket` connection
+and negotiates the frame geometry from `SIMDET1:cam1:{MinX,MinY,SizeX,SizeY,
+ColorMode,DataType}`, so the only prop it needs is the prefix. Alongside it,
+plain PV cards drive `SimMode`, `ColorMode`, `Acquire` and `AcquirePeriod` —
+changing any of them updates the live image.
 
 Both render through one `SignalCard`, which shows the live value, units,
 control limits, connection state, and a setpoint control (a text input, or
@@ -99,12 +189,43 @@ docker's default bridge network. The `ophyd-websocket` service therefore sends
 directed searches instead:
 
 ```yaml
-EPICS_CA_ADDR_LIST: "caproto-ioc"
+EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector"
 EPICS_CA_AUTO_ADDR_LIST: "NO"
 ```
 
-and the IOC binds `--interfaces 0.0.0.0`. Point `EPICS_CA_ADDR_LIST` at a
-different host to talk to a real IOC instead.
+and both IOCs bind `--interfaces 0.0.0.0`. The list is space separated, so add
+or swap hosts to talk to a real IOC instead.
+
+## Why ophyd-websocket is pinned to linux/amd64
+
+`Dockerfile` pins `--platform=linux/amd64` and that pin is required. pyepics
+bundles `libca` only for x86_64 (`clibs/linux64`) and 32-bit ARM
+(`clibs/linuxarm`); there is no aarch64 build, and Debian does not package
+EPICS base. A native arm64 image dies on import with:
+
+```
+epics.ca.ChannelAccessException: loading Epics CA DLL failed:
+  .../epics/clibs/linux64/libca.so: cannot open shared object file
+```
+
+The cost on Apple silicon is that this one container runs under emulation,
+which matters because it is the container that JPEG-encodes every camera frame.
+That is why the simulated detector defaults to 256×256 at 5 Hz (~0.3 MB/s)
+rather than 512×512 at 10 Hz (~2 MB/s). Turn it up at runtime via `SizeX` /
+`SizeY` / `AcquirePeriod` when you want to stress the pipeline. Going native
+would mean building EPICS base from source for aarch64 and pointing
+`PYEPICS_LIBCA` at the result.
+
+## Two frontend gotchas worth knowing
+
+- **The SPA does not use `<React.StrictMode>`.** finch's camera hook opens its
+  websocket behind a one-shot "already initialised" ref, so StrictMode's
+  simulated unmount closes the socket and the remount refuses to reopen it,
+  leaving the canvas permanently disconnected in dev.
+- **Tailwind has to scan finch's dist.** finch ships unbundled Tailwind classes,
+  so `src/index.css` carries
+  `@source '../node_modules/@blueskyproject/finch/dist'`. Without it finch's
+  components render completely unstyled.
 
 # Installation
 ```bash

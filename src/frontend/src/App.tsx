@@ -1,9 +1,13 @@
 import { useCallback, useState } from 'react'
 import { useOphydDeviceSocket, useOphydPVSocket } from '@blueskyproject/finch'
+import CameraPanel from './components/CameraPanel'
 import Sidebar from './components/Sidebar'
 import SignalCard from './components/SignalCard'
 import { ophydApiUrl } from './lib/config'
 import { useDeviceRegistry } from './lib/useDeviceRegistry'
+
+/** Prefix of the simulated areaDetector in caproto/sim_detector_ioc.py. */
+const DETECTOR_PREFIX = 'SIMDET1'
 
 /** A few PVs from caproto/sim_ioc.py, offered as a one-click starting point. */
 const SUGGESTED_PVS = [
@@ -63,6 +67,13 @@ export default function App() {
         </header>
 
         <div className="space-y-8 p-6">
+          <section>
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+              Camera — /camera-socket
+            </h2>
+            <CameraPanel prefix={DETECTOR_PREFIX} />
+          </section>
+
           <section>
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
               Devices — /device-socket
