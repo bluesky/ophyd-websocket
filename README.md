@@ -18,6 +18,94 @@ Ophyd async is not currently supported.
 A single websocket instance can hold any number of device subscriptions.
 
 
+# Local test stack (docker compose)
+
+A batteries-included stack for developing against ophyd-websocket without a
+real beamline. Three services:
+
+| Service | What it is | Where |
+| --- | --- | --- |
+| `caproto-ioc` | Simulated EPICS IOC serving `SIM:*` PVs | `caproto/sim_ioc.py` |
+| `ophyd-websocket` | This server, with ophyd devices wrapping those PVs | `startup/sim_devices.py` |
+| `frontend` | Minimal React/Tailwind SPA driven by the finch hooks | `src/frontend/` |
+
+```bash
+docker compose up --build
+open http://localhost:5173
+```
+
+Ports: frontend `5173`, ophyd-websocket `8001`, IOC Channel Access `5064`.
+
+## The simulated IOC
+
+`caproto/sim_ioc.py` is a caproto `PVGroup`. caproto is a dev dependency of
+this project, so the IOC image is built from the same `uv.lock`.
+
+| PVs | Behavior |
+| --- | --- |
+| `SIM:m1`, `SIM:m2`, `SIM:m3` | Full motor records (caproto's `FakeMotor`), different velocities and travel limits |
+| `SIM:det:Counts`, `:Acquire`, `:ExposureTime`, `:ImageCounter`, `:PeakCenter`, `:PeakWidth` | Point detector; counts are a noisy gaussian in `m1`'s position, so moving `m1` toward `PeakCenter` (default 5.0) makes counts spike. Free-running by default |
+| `SIM:temp:Setpoint`, `:Readback`, `:Heater`, `:AtSetpoint` | Temperature controller; the readback walks toward the setpoint only while `Heater` is `On` |
+| `SIM:beam:Current`, `:Energy`, `:Energy_RBV`, `:Shutter`, `:Status` | Ring current decaying with top-up refills, energy readback slewing to its setpoint, a shutter enum, a status string |
+| `SIM:sample:Name`, `:Barcode`, `:Filter`, `:StageIn` | String and enum PVs (`Filter` is a 5-choice mbbo) |
+| `SIM:spectrum:Data`, `:NPoints` | 256-point waveform: two drifting gaussian peaks plus noise |
+| `SIM:Uptime` | Seconds since IOC start |
+
+Run it standalone (outside docker) with:
+
+```bash
+uv run python caproto/sim_ioc.py --list-pvs
+```
+
+## The ophyd devices
+
+`startup/sim_devices.py` is mounted at `/startup` and loaded via
+`--startup-dir`. It defines both composite devices (`detector`, `temperature`,
+`beamline`, `sample`, `spectrum`), three `EpicsMotor`s (`m1`–`m3`), and a
+handful of flat signals (`ring_current`, `photon_energy`, `shutter`,
+`detector_counts`, …) — 17 registry entries in total. The PV prefix comes from
+`SIM_PV_PREFIX` (default `SIM:`), so the same file works against a locally run
+IOC.
+
+Because the directory is bind-mounted, editing it and calling
+`POST /api/v1/load-devices` reloads the registry without a restart.
+
+## The frontend
+
+`src/frontend/` is a Vite + React + Tailwind v4 single-page app. It uses two
+finch hooks:
+
+- `useOphydDeviceSocket` — registry devices over `/api/v1/device-socket`. The
+  sidebar lists whatever `GET /api/v1/devices` returns; click to subscribe.
+- `useOphydPVSocket` — arbitrary PV names over `/api/v1/pv-socket`. Type any PV
+  into the sidebar form.
+
+Both render through one `SignalCard`, which shows the live value, units,
+control limits, connection state, and a setpoint control (a text input, or
+buttons when the signal has `enum_strs`).
+
+The socket URLs are derived from `ophydApiUrl` on finch's `FinchConfigProvider`,
+which reads `VITE_OPHYD_API_URL` and otherwise falls back to
+`http://<current-host>:8001/api/v1`. Note this URL is resolved in the *browser*,
+so it points at the host-published port rather than a docker service name.
+
+Dev server runs with HMR against a read-only bind mount of `src/frontend/src`,
+so edits show up live.
+
+## Channel Access across containers
+
+CA name resolution normally relies on UDP broadcast, which does not work across
+docker's default bridge network. The `ophyd-websocket` service therefore sends
+directed searches instead:
+
+```yaml
+EPICS_CA_ADDR_LIST: "caproto-ioc"
+EPICS_CA_AUTO_ADDR_LIST: "NO"
+```
+
+and the IOC binds `--interfaces 0.0.0.0`. Point `EPICS_CA_ADDR_LIST` at a
+different host to talk to a real IOC instead.
+
 # Installation
 ```bash
 pip install ophyd-websocket
