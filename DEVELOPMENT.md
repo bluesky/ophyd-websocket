@@ -20,10 +20,34 @@ Run the server from source:
 uv run ophyd-websocket
 ```
 
-Running tests:
+## Tests
+
 ```bash
-uv run pytest
+uv run pytest                  # everything
+uv run pytest -m "not ioc"     # no EPICS needed (what CI runs on every push)
+uv run pytest -m ioc           # only the Channel Access integration tests
 ```
+
+Two layers, both under `src/tests/`:
+
+| Layer | Files | How it works |
+| --- | --- | --- |
+| Route and socket tests | `test_core_api.py`, `test_pv_socket.py`, `test_device_socket.py`, `test_camera_socket.py`, `test_camera_shared_socket.py`, `test_tiff_socket.py`, `test_qs_console_socket.py`, `test_queue_safety.py`, `test_server_app.py` | Every endpoint is driven through a FastAPI `TestClient`. The ophyd classes each router imports (`EpicsSignal`, `EpicsSignalRO`, `EpicsMotor`, `PseudoPositioner`) are monkeypatched with the in-memory fakes in `fakes.py`, so no IOC, no libca connection, and no queue server is required. Tests push values by calling `signal.emit_value(...)`, which invokes the router's own subscription callbacks. |
+| Channel Access integration | `test_websockets.py` (marked `ioc`) | Runs against the caproto IOC in `test_ioc.py` and the devices in `test_startup.py`, over real CA. |
+
+The test IOC listens on CA port **5094**, not the default 5064, so it never
+collides with a simulated detector or a real IOC already running on the machine.
+Override with `OAS_TEST_IOC_CA_PORT`. `conftest.py` sets `EPICS_CA_ADDR_LIST`
+and friends at import time, because libca reads them once when the CA context is
+first created.
+
+Adding a fake device to a socket test means giving the fake whatever surface the
+handler touches — see `FakeSignalBase` in `fakes.py`. The concrete fakes are
+deliberately *siblings*, never subclasses of each other, because
+`device_socket.recursively_subscribe` dispatches with `isinstance`.
+
+GitHub Actions (`.github/workflows/tests.yml`) runs the IOC-free suite on Python
+3.12 and 3.13, and the CA integration suite in a separate job.
 
 # Local test stack (docker compose)
 

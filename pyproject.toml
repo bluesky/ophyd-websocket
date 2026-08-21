@@ -43,6 +43,7 @@ packages = ["src/ophyd_websocket"]
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-timeout",
     "httpx",
     "pytest-mock>=3.10.0",
     "caproto>=1.0.0",
@@ -50,8 +51,13 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["src/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "ignore::RuntimeWarning",
     "ignore::pytest.PytestCollectionWarning",
 ]
-addopts = "--disable-warnings"
+addopts = "--disable-warnings --timeout=120"
+markers = [
+    "ioc: test requires the caproto test IOC and a working Channel Access stack",
+]

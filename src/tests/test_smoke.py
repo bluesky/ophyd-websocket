@@ -2,11 +2,7 @@
 Simple smoke tests for the testing infrastructure
 """
 import pytest
-import sys
 from pathlib import Path
-
-# Add server directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "ophyd_websocket"))
 
 
 def test_server_import():
