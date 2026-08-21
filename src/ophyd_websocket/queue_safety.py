@@ -61,6 +61,10 @@ async def get_queue_server_status() -> dict:
                     detail=f"Queue server returned status {response.status_code}: {response.text}"
                 )
                 
+    except HTTPException:
+        # Already-classified responses (401/403/other upstream codes) must not
+        # be swallowed by the generic handler below and reported as a 500.
+        raise
     except httpx.ConnectError as e:
         raise HTTPException(
             status_code=503,
