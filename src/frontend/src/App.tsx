@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { useOphydDeviceSocket, useOphydPVSocket } from '@blueskyproject/finch'
 import CameraPanel from './components/CameraPanel'
+import TIFFPanel from './components/TIFFPanel'
 import Sidebar from './components/Sidebar'
 import SignalCard from './components/SignalCard'
 import { ophydApiUrl } from './lib/config'
@@ -8,6 +9,9 @@ import { useDeviceRegistry } from './lib/useDeviceRegistry'
 
 /** Prefix of the simulated areaDetector in caproto/sim_detector_ioc.py. */
 const DETECTOR_PREFIX = 'SIMDET1'
+
+/** Prefix of the simulated TIFF-writer in caproto/sim_tiff_detector_ioc.py. */
+const TIFF_DETECTOR_PREFIX = 'SIMTIFF1'
 
 /** A few PVs from caproto/sim_ioc.py, offered as a one-click starting point. */
 const SUGGESTED_PVS = [
@@ -72,6 +76,13 @@ export default function App() {
               Camera — /camera-socket
             </h2>
             <CameraPanel prefix={DETECTOR_PREFIX} />
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+              TIFF — /tiff-socket
+            </h2>
+            <TIFFPanel prefix={TIFF_DETECTOR_PREFIX} />
           </section>
 
           <section>

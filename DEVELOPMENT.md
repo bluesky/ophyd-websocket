@@ -34,6 +34,7 @@ real beamline. Three services:
 | --- | --- | --- |
 | `caproto-ioc` | Simulated EPICS IOC serving `SIM:*` PVs | `caproto/sim_ioc.py` |
 | `caproto-detector` | Simulated areaDetector serving `SIMDET1:*` PVs | `caproto/sim_detector_ioc.py` |
+| `caproto-tiff-detector` | Simulated TIFF-writer serving `SIMTIFF1:*` PVs | `caproto/sim_tiff_detector_ioc.py` |
 | `ophyd-websocket` | This server, with ophyd devices wrapping those PVs | `startup/` |
 | `frontend` | Minimal React/Tailwind SPA driven by the finch hooks | `src/frontend/` |
 
@@ -105,6 +106,34 @@ Run it standalone with:
 uv run python caproto/sim_detector_ioc.py --list-pvs
 ```
 
+## The simulated TIFF-writer detector
+
+`caproto/sim_tiff_detector_ioc.py` mimics the one moving part of an
+areaDetector TIFF file plugin that ophyd-websocket's `/tiff-socket` consumes: a
+`TIFF1:FullFileName_RBV` PV naming the most recently saved file on disk.
+
+| PVs | Behavior |
+| --- | --- |
+| `SIMTIFF1:TIFF1:FullFileName_RBV` | Absolute path of the "current" TIFF; a CHAR waveform (like real AD) so it can exceed the 40-char EPICS string limit |
+| `SIMTIFF1:TIFF1:FileNumber_RBV` | Index (0–2) of the current file |
+| `SIMTIFF1:TIFF1:NumCaptured_RBV` | Running count of files "written" |
+
+It cycles `FullFileName_RBV` through a fixed set of sample TIFFs in
+`caproto/assets/det_1m_*.tiff` every 2 s. When the PV changes, `/tiff-socket`
+loads the file, log-normalizes and JPEG-encodes it, and pushes it to finch's
+`TIFFCanvas` in the browser.
+
+**The path in the PV must be readable by the *ophyd-websocket* process**, not
+the IOC. Run locally that is the same filesystem, so the default resolves to the
+repo's `caproto/assets`. In docker both containers mount the assets at `/assets`
+(via `SIM_TIFF_ASSETS_DIR`) so the path string matches on both sides.
+
+Run it standalone with:
+
+```bash
+uv run python caproto/sim_tiff_detector_ioc.py --list-pvs
+```
+
 ## The ophyd devices
 
 `startup/sim_devices.py` is mounted at `/startup` and loaded via
@@ -139,6 +168,12 @@ and negotiates the frame geometry from `SIMDET1:cam1:{MinX,MinY,SizeX,SizeY,
 ColorMode,DataType}`, so the only prop it needs is the prefix. Alongside it,
 plain PV cards drive `SimMode`, `ColorMode`, `Acquire` and `AcquirePeriod` —
 changing any of them updates the live image.
+
+Below the camera, the TIFF section renders finch's `TIFFCanvas` pointed at the
+`SIMTIFF1` prefix. The canvas opens its own `/api/v1/tiff-socket` connection,
+sends `{ prefix }`, and the server watches `SIMTIFF1:TIFF1:FullFileName_RBV` —
+so as the TIFF IOC cycles files, the viewer updates. Read-only file-writer
+status PVs sit alongside it.
 
 Both render through one `SignalCard`, which shows the live value, units,
 control limits, connection state, and a setpoint control (a text input, or

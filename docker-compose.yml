@@ -41,6 +41,22 @@ services:
     networks:
       - beamline
 
+  caproto-tiff-detector:
+    build:
+      context: .
+      dockerfile: caproto/Dockerfile
+    container_name: caproto-tiff-detector
+    environment:
+      SIM_IOC_SCRIPT: "caproto/sim_tiff_detector_ioc.py"
+      SIM_PV_PREFIX: "SIMTIFF1:"
+      # FullFileName_RBV must name a path that *ophyd-websocket* can open, so
+      # both containers mount the sample TIFFs at the same /assets path.
+      SIM_TIFF_ASSETS_DIR: "/assets"
+    volumes:
+      - ./caproto/assets:/assets:ro
+    networks:
+      - beamline
+
   ophyd-websocket:
     build:
       context: .
@@ -49,6 +65,7 @@ services:
     depends_on:
       - caproto-ioc
       - caproto-detector
+      - caproto-tiff-detector
     command: ["uv", "run", "python", "src/ophyd_websocket/server.py", "--startup-dir", "/startup"]
     environment:
       OAS_HOST: "0.0.0.0"
@@ -57,7 +74,7 @@ services:
       OAS_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
       OAS_REQUIRE_QSERVER: "false"
       # Unicast CA searches straight at the IOC containers (space separated).
-      EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector"
+      EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector caproto-tiff-detector"
       EPICS_CA_AUTO_ADDR_LIST: "NO"
       EPICS_CA_MAX_ARRAY_BYTES: "10000000"
       SIM_PV_PREFIX: "SIM:"
@@ -65,6 +82,8 @@ services:
     volumes:
       # Live-editable ophyd device definitions.
       - ./startup:/startup:ro
+      # Sample TIFFs, at the same path the TIFF IOC writes into FullFileName_RBV.
+      - ./caproto/assets:/assets:ro
     ports:
       - "8001:8001"
     networks:
