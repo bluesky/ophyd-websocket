@@ -171,6 +171,17 @@ def test_update_enum_lists_keeps_defaults_when_pv_has_none():
     assert dtype == ["UInt16"]
 
 
+def _geometry_signals():
+    return {
+        "startX": FakeSignalRO("sx", value=0),
+        "startY": FakeSignalRO("sy", value=0),
+        "sizeX": FakeSignalRO("wx", value=8),
+        "sizeY": FakeSignalRO("wy", value=8),
+        "colorMode": FakeSignalRO("cm", value=0),
+        "dataType": FakeSignalRO("dt", value=3),
+    }
+
+
 def test_update_dimensions_pushes_settings_onto_buffer():
     import asyncio
 
@@ -188,6 +199,78 @@ def test_update_dimensions_pushes_settings_onto_buffer():
 
     _, _, settings = buffer.get_nowait()
     assert settings == {"x": 8, "y": 16, "colorMode": "Mono", "dataType": "UInt16"}
+
+
+# --------------------------------------------------------------------------
+# Queue handoff (thread safety)
+# --------------------------------------------------------------------------
+
+async def test_put_dropping_oldest_enqueues():
+    import asyncio
+
+    buffer = asyncio.Queue(maxsize=4)
+
+    camera_socket.put_dropping_oldest(buffer, "frame")
+
+    assert buffer.get_nowait() == "frame"
+
+
+async def test_put_dropping_oldest_discards_the_stalest_frame():
+    import asyncio
+
+    buffer = asyncio.Queue(maxsize=2)
+    camera_socket.put_dropping_oldest(buffer, "old")
+    camera_socket.put_dropping_oldest(buffer, "middle")
+
+    camera_socket.put_dropping_oldest(buffer, "new")
+
+    assert [buffer.get_nowait(), buffer.get_nowait()] == ["middle", "new"]
+    assert buffer.empty()
+
+
+async def test_update_dimensions_without_a_loop_enqueues_inline():
+    import asyncio
+
+    buffer = asyncio.Queue()
+
+    camera_socket.update_dimensions(_geometry_signals(), buffer)
+
+    assert buffer.qsize() == 1
+
+
+async def test_update_dimensions_with_a_loop_defers_to_the_event_loop():
+    """Passing `loop` is what makes the settings callback safe off-thread."""
+    import asyncio
+
+    buffer = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    camera_socket.update_dimensions(_geometry_signals(), buffer, loop=loop)
+
+    # Scheduled, not applied yet: the enqueue happens on the loop's next pass.
+    assert buffer.empty()
+    await asyncio.sleep(0)
+    _, _, settings = buffer.get_nowait()
+    assert settings["colorMode"] == "Mono"
+
+
+def test_camera_socket_delivers_a_frame_emitted_from_a_worker_thread(client, camera_signals):
+    """ophyd fires callbacks on CA threads, not on the thread that subscribed."""
+    import threading
+
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        ws.receive_json()
+        ws.receive_bytes()
+
+        thread = threading.Thread(
+            target=camera_signals[ARRAY_PV].emit_value,
+            args=(list(range(63, -1, -1)),),
+        )
+        thread.start()
+        thread.join()
+
+        assert Image.open(io.BytesIO(ws.receive_bytes())).size == (8, 8)
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +403,8 @@ def test_get_buffer_returns_the_exception_on_unknown_dtype():
 # End-to-end WebSocket flow
 # --------------------------------------------------------------------------
 
+ARRAY_PV = "MYDET:image1:ArrayData"
+
 CAMERA_PV_VALUES = {
     "MYDET:cam1:MinX": 0,
     "MYDET:cam1:MinY": 0,
@@ -360,22 +445,64 @@ def test_camera_socket_streams_settings_then_a_jpeg_frame(client, camera_signals
         assert Image.open(io.BytesIO(frame)).size == (8, 8)
 
 
-def test_camera_socket_subscribes_to_array_and_setting_pvs(client, camera_signals):
-    """Later frames arrive via these subscriptions, from an ophyd CA thread.
+def test_camera_socket_pushes_new_frames_from_the_array_callback(client, camera_signals):
+    """A frame delivered on a CA thread reaches the client.
 
-    Delivery itself is not asserted here: ``array_cb`` calls
-    ``asyncio.Queue.put_nowait`` directly from the callback thread rather than
-    going through ``loop.call_soon_threadsafe`` (the way camera_shared_socket
-    does), so a single injected frame is not guaranteed to wake the streaming
-    task in-process. What is verifiable -- and what breaks if the wiring is
-    dropped -- is that every PV is subscribed.
+    ``array_cb`` runs on an ophyd Channel Access thread and hands the frame to
+    the event loop with ``call_soon_threadsafe``; touching the asyncio.Queue
+    from the callback thread directly would not reliably wake the streamer.
     """
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        ws.receive_json()
+        first_frame = ws.receive_bytes()
+
+        camera_signals[ARRAY_PV].emit_value(list(range(63, -1, -1)))
+
+        second_frame = ws.receive_bytes()
+
+    assert Image.open(io.BytesIO(second_frame)).size == (8, 8)
+    assert second_frame != first_frame
+
+
+def test_camera_socket_pushes_several_frames_in_order(client, camera_signals):
     with client.websocket_connect("/api/v1/camera-socket") as ws:
         ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
         ws.receive_json()
         ws.receive_bytes()
 
-        assert camera_signals["MYDET:image1:ArrayData"].subscriptions
+        for offset in (100, 200, 300):
+            camera_signals[ARRAY_PV].emit_value([offset + i for i in range(64)])
+            assert Image.open(io.BytesIO(ws.receive_bytes())).size == (8, 8)
+
+
+def test_camera_socket_pushes_new_dimensions_from_a_settings_callback(client, camera_signals):
+    """A geometry change on a CA thread is republished to the client."""
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        assert ws.receive_json()["colorMode"] == "Mono"
+        ws.receive_bytes()
+
+        # Widen the ROI, then fire the settings callback the way ophyd would.
+        camera_signals["MYDET:cam1:SizeX"]._value = 16
+        camera_signals["MYDET:cam1:SizeY"]._value = 4
+        camera_signals["MYDET:cam1:SizeX"].emit_value(16)
+
+        assert ws.receive_json() == {
+            "x": 16,
+            "y": 4,
+            "colorMode": "Mono",
+            "dataType": "UInt16",
+        }
+
+
+def test_camera_socket_subscribes_to_array_and_setting_pvs(client, camera_signals):
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        ws.receive_json()
+        ws.receive_bytes()
+
+        assert camera_signals[ARRAY_PV].subscriptions
         for pv in CAMERA_PV_VALUES:
             assert camera_signals[pv].subscriptions, f"{pv} was not subscribed"
 

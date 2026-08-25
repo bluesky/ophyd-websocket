@@ -54,6 +54,11 @@ router = APIRouter()
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
+    # ophyd delivers subscription callbacks on Channel Access threads, so every
+    # touch of `buffer` (an asyncio.Queue, which is not thread-safe) has to be
+    # scheduled back onto this loop with call_soon_threadsafe.
+    loop = asyncio.get_running_loop()
+
     buffer = asyncio.Queue(maxsize=1000)
     settings_list, image_array_pv = await initialize_settings(websocket)
     logger.debug(f"Initialized settings list: {settings_list}, image array PV: {image_array_pv}")
@@ -68,15 +73,13 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     color_mode_enum_list, data_type_enum_list = update_enum_lists(settingSignals, color_mode_enum_list, data_type_enum_list)
 
     def array_cb(value, timestamp, **kwargs):
-        if buffer.qsize() >= buffer.maxsize:
-            buffer.get_nowait()
-        try:
-            buffer.put_nowait((value, timestamp, False))
-        except asyncio.QueueFull:
-            logger.warning("Buffer full, dropping frame")
+        # Called from a CA thread: only the loop may touch the queue.
+        loop.call_soon_threadsafe(put_dropping_oldest, buffer, (value, timestamp, False))
 
     def settings_cb(value, timestamp, **kwargs):
-        update_dimensions(settingSignals, buffer)
+        # Read the setting PVs here, on the CA thread, so the blocking gets stay
+        # off the event loop; only the finished dimensions cross over.
+        update_dimensions(settingSignals, buffer, loop=loop)
 
 
     for key in settingSignals:
@@ -94,8 +97,11 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         return
     array_signal.subscribe(array_cb)
 
-    settings_cb(None, None) #call once to initialize all dimensions prior to loading images
-    buffer.put_nowait((array_signal.get(), time.time(), False)) #call once to load the current frame
+    # Enqueue the dimensions directly (not via settings_cb) so they are ahead of
+    # the first frame in the queue; a deferred call_soon_threadsafe would land
+    # after the frame below and leave the streamer with nothing to reshape with.
+    update_dimensions(settingSignals, buffer)
+    put_dropping_oldest(buffer, (array_signal.get(), time.time(), False)) #load the current frame
 
 
     await handle_streaming(websocket, buffer)
@@ -171,7 +177,30 @@ def update_enum_lists(settingSignals, color_mode_enum_list, data_type_enum_list)
     data_type_enum_list = getattr(settingSignals['dataType'], 'enum_strs', data_type_enum_list)
     return color_mode_enum_list, data_type_enum_list
 
-def update_dimensions(settingSignals, buffer):
+def put_dropping_oldest(buffer, item):
+    """Enqueue `item`, discarding the oldest entry when the buffer is full.
+
+    Must only be called from the event loop thread -- asyncio.Queue is not
+    thread-safe. Callbacks arriving on a CA thread go through
+    `loop.call_soon_threadsafe(put_dropping_oldest, buffer, item)`.
+    """
+    if buffer.qsize() >= buffer.maxsize:
+        try:
+            buffer.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        buffer.put_nowait(item)
+    except asyncio.QueueFull:
+        logger.warning("Buffer full, dropping frame")
+
+
+def update_dimensions(settingSignals, buffer, loop=None):
+    """Read the geometry PVs and enqueue the resulting dimensions.
+
+    The PV reads happen on the calling thread. Pass `loop` when calling from a
+    CA callback thread so the enqueue is handed back to the event loop.
+    """
     color_mode_value = settingSignals['colorMode'].get()
     data_type_value = settingSignals['dataType'].get()
     tempDimensions = {
@@ -184,7 +213,11 @@ def update_dimensions(settingSignals, buffer):
         'dataType': data_type_enum_list[data_type_value]
     }
     logger.debug(f"Updated image dimensions: {tempDimensions}")
-    buffer.put_nowait((None, time.time(), tempDimensions))
+    item = (None, time.time(), tempDimensions)
+    if loop is None:
+        put_dropping_oldest(buffer, item)
+    else:
+        loop.call_soon_threadsafe(put_dropping_oldest, buffer, item)
 
 # Main loop for streaming images
 async def handle_streaming(websocket, buffer):
@@ -210,12 +243,20 @@ async def handle_streaming(websocket, buffer):
         # Run the listener in the background
         asyncio.create_task(listen_for_client_messages())
 
+        currentSettings = None
+
         while True:
             rawImageArray, timestamp, updatedSettings = await buffer.get()
 
             if updatedSettings:
                 currentSettings = updatedSettings
                 await websocket.send_text(json.dumps(currentSettings))
+                continue
+
+            if currentSettings is None:
+                # A frame overtook the first dimensions update; nothing to
+                # reshape it with yet.
+                logger.debug("Dropping frame received before image dimensions were known")
                 continue
 
             height, width, colorMode, dataType = currentSettings['y'], currentSettings['x'], currentSettings['colorMode'], currentSettings['dataType']

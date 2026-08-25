@@ -78,7 +78,14 @@ class FakeSignalBase:
             FakeSignalBase.instances.append(self)
 
     # --- ophyd surface -------------------------------------------------
+    # ophyd resolves a subscribe() with no event_type to the object's default
+    # event, which is 'value' for signals. The camera and TIFF sockets rely on
+    # that default, so the fakes have to honour it too.
+    default_sub = "value"
+
     def subscribe(self, callback, event_type=None, run=False):
+        if event_type is None:
+            event_type = self.default_sub
         self.subscriptions.setdefault(event_type, []).append(callback)
         self._next_sub_id += 1
         return self._next_sub_id
