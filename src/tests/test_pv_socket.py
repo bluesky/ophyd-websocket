@@ -111,6 +111,8 @@ def test_subscribe_single_pv(client, signals):
     with connect(client) as ws:
         ws.send_json({"action": "subscribe", "pv": "IOC:m1"})
         summary = ws.receive_json()
+        # Check wiring while the socket is open; closing it destroys the signal.
+        assert set(signals["IOC:m1"].subscriptions) == {"meta", "value"}
 
     assert summary == {
         "action": "subscribe",
@@ -118,8 +120,6 @@ def test_subscribe_single_pv(client, signals):
         "already_subscribed": [],
         "failed": [],
     }
-    signal = signals["IOC:m1"]
-    assert set(signal.subscriptions) == {"meta", "value"}
 
 
 def test_subscribe_multiple_pvs_via_plural_key(client, signals):
@@ -214,7 +214,22 @@ def test_unsubscribe_clears_callbacks(client, signals):
         "unsubscribed": ["IOC:m1"],
         "not_subscribed": [],
     }
-    assert signals["IOC:m1"].reset_subs == ["meta", "value"]
+    # Unsubscribe removes exactly the callbacks we registered (by cid), leaving
+    # the signal itself alone -- pyepics caches the CA channel across signals.
+    assert signals["IOC:m1"].subscriptions == {}
+    assert signals["IOC:m1"].unsubscribed_ids
+    assert signals["IOC:m1"].destroyed is False
+
+
+def test_disconnect_tears_down_subscriptions(client, signals):
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "pv": "IOC:m1"})
+        ws.receive_json()
+
+    # Leaving the `with` block closes the socket; the handler's finally must
+    # remove our callbacks so no CA monitor fires into a dead event loop.
+    assert signals["IOC:m1"].subscriptions == {}
+    assert signals["IOC:m1"].unsubscribed_ids
 
 
 def test_unsubscribe_unknown_pv_is_reported_not_subscribed(client, signals):

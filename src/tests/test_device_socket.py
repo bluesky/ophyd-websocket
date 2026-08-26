@@ -78,6 +78,8 @@ def test_subscribe_to_signal_device(client, fake_registry):
     with connect(client) as ws:
         ws.send_json({"action": "subscribe", "device": "m1"})
         summary = ws.receive_json()
+        # Check wiring while the socket is open; closing it tears subs down.
+        assert set(signal.subscriptions) == {"meta", "value"}
 
     assert summary == {
         "action": "subscribe",
@@ -85,7 +87,6 @@ def test_subscribe_to_signal_device(client, fake_registry):
         "already_subscribed": [],
         "failed": [],
     }
-    assert set(signal.subscriptions) == {"meta", "value"}
 
 
 def test_subscribe_to_motor_uses_readback_and_walks_signals(client, fake_registry):
@@ -95,9 +96,8 @@ def test_subscribe_to_motor_uses_readback_and_walks_signals(client, fake_registr
     with connect(client) as ws:
         ws.send_json({"action": "subscribe", "device": "m2_motor"})
         assert ws.receive_json()["subscribed"] == ["m2_motor"]
-
-    assert "readback" in motor.subscriptions
-    assert "meta" in motor.subscriptions
+        assert "readback" in motor.subscriptions
+        assert "meta" in motor.subscriptions
 
 
 def test_subscribe_to_pseudo_positioner_uses_readback_only(client, fake_registry):
@@ -107,8 +107,7 @@ def test_subscribe_to_pseudo_positioner_uses_readback_only(client, fake_registry
     with connect(client) as ws:
         ws.send_json({"action": "subscribe", "device": "pseudo"})
         assert ws.receive_json()["subscribed"] == ["pseudo"]
-
-    assert list(pseudo.subscriptions) == ["readback"]
+        assert list(pseudo.subscriptions) == ["readback"]
 
 
 def test_subscribe_recurses_into_composite_device_components(client, fake_registry):
@@ -120,9 +119,8 @@ def test_subscribe_recurses_into_composite_device_components(client, fake_regist
     with connect(client) as ws:
         ws.send_json({"action": "subscribe", "device": "detector"})
         assert ws.receive_json()["subscribed"] == ["detector"]
-
-    assert set(counts.subscriptions) == {"meta", "value"}
-    assert set(exposure.subscriptions) == {"meta", "value"}
+        assert set(counts.subscriptions) == {"meta", "value"}
+        assert set(exposure.subscriptions) == {"meta", "value"}
 
 
 def test_subscribe_multiple_devices(client, fake_registry):
@@ -222,7 +220,25 @@ def test_unsubscribe_clears_callbacks(client, fake_registry):
         "unsubscribed": ["m1"],
         "not_subscribed": [],
     }
-    assert signal.reset_subs == ["meta", "value"]
+    # Registry devices are shared, so the socket removes only the callbacks it
+    # registered (by subscription id) and must NOT destroy the device.
+    assert signal.subscriptions == {}
+    assert signal.unsubscribed_ids  # our exact cids were unsubscribed
+    assert signal.destroyed is False
+
+
+def test_disconnect_tears_down_subscriptions(client, fake_registry):
+    signal = FakeSignal("IOC:m1", name="m1")
+    fake_registry.add_device("m1", signal)
+
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "device": "m1"})
+        ws.receive_json()
+
+    # Closing the socket must remove this connection's callbacks from the shared
+    # device without destroying it.
+    assert signal.subscriptions == {}
+    assert signal.destroyed is False
 
 
 def test_unsubscribe_unknown_device(client, fake_registry):

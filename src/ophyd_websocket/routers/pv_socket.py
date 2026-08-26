@@ -65,10 +65,12 @@ async def websocket_endpoint(websocket: WebSocket):
             message = {key: value for key, value in kwargs.items()}
             message['obj'] = pv_name
             message['pv'] = pv_name
+            if loop.is_closed():
+                return
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-            except WebSocketDisconnect:
-                logger.info(f"Connection closed while sending update for PV: {pv_name}")
+            except (WebSocketDisconnect, RuntimeError):
+                logger.debug(f"Connection closed while sending update for PV: {pv_name}")
 
         def callbackValue(value, timestamp, **kwargs):
             if isinstance(value, np.ndarray) and logger.isEnabledFor(logging.DEBUG):
@@ -97,14 +99,20 @@ async def websocket_endpoint(websocket: WebSocket):
                         "read_access": signal.read_access,
                         "write_access": signal.write_access,
                     }
+            if loop.is_closed():
+                return
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-            except WebSocketDisconnect:
-                logger.info(f"Connection closed while sending update for PV: {pv_name}")
+            except (WebSocketDisconnect, RuntimeError):
+                logger.debug(f"Connection closed while sending update for PV: {pv_name}")
 
-        signal.subscribe(callbackMd, event_type='meta')
-        signal.subscribe(callbackValue, event_type='value')
+        cid_meta = signal.subscribe(callbackMd, event_type='meta')
+        cid_value = signal.subscribe(callbackValue, event_type='value')
         subscriptions[pv_name] = signal
+        # (object, cid) pairs so teardown removes exactly our callbacks. pyepics
+        # caches PV channels by name across signals, so unsubscribing beats
+        # destroy(), which would tear down a channel a later signal reuses.
+        sub_handles[pv_name] = [(signal, cid_meta), (signal, cid_value)]
 
     async def _try_subscribe_one(pv_name, signal, requireConnection):
         """Attempt to subscribe a single PV signal. Returns error string on failure, None on success."""
@@ -189,6 +197,21 @@ async def websocket_endpoint(websocket: WebSocket):
             f"{len(already)} already subscribed, {len(failures)} failed"
         )
 
+    def _teardown_pv(pv_name):
+        """Remove exactly the callbacks this connection registered on a PV so no
+        CA monitor keeps firing into a dead event loop. Returns True if the PV
+        was subscribed."""
+        handles = sub_handles.pop(pv_name, None)
+        subscriptions.pop(pv_name, None)
+        if handles is None:
+            return False
+        for obj, cid in handles:
+            try:
+                obj.unsubscribe(cid)
+            except Exception:
+                logger.debug(f"Error tearing down PV subscription: {pv_name}", exc_info=True)
+        return True
+
     async def handleUnsubscribe(data):
         names = _names_from(data, "pv", "pvs")
 
@@ -203,10 +226,7 @@ async def websocket_endpoint(websocket: WebSocket):
         not_subscribed = []
 
         for pv_name in names:
-            if pv_name in subscriptions:
-                subscriptions[pv_name]._reset_sub(event_type='meta')
-                subscriptions[pv_name]._reset_sub(event_type='value')
-                del subscriptions[pv_name]
+            if _teardown_pv(pv_name):
                 unsubscribed.append(pv_name)
                 logger.debug(f"Unsubscribed from PV: {pv_name}")
             else:
@@ -275,6 +295,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"error": f"Could not set value of {pv_name} to {value}: {str(error)}"})
 
     subscriptions = {}
+    sub_handles = {}
 
     try:
         while True:
@@ -318,4 +339,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}", exc_info=True)
     finally:
+        # Drop every subscription this connection created so no CA monitor
+        # outlives the socket and fires a callback into a dead event loop.
+        for pv_name in list(subscriptions):
+            _teardown_pv(pv_name)
         logger.info("WebSocket connection to /pv-socket closed.")

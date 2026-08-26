@@ -67,8 +67,11 @@ class FakeSignalBase:
         self.put_error = put_error
 
         self.subscriptions = {}   # event_type -> [callbacks]
+        self.subs_by_id = {}      # sub_id -> (event_type, callback)
         self.cleared_subs = []
         self.reset_subs = []
+        self.unsubscribed_ids = []
+        self.destroyed = False
         self.put_calls = []
         self.set_calls = []
         self.get_calls = 0
@@ -88,7 +91,29 @@ class FakeSignalBase:
             event_type = self.default_sub
         self.subscriptions.setdefault(event_type, []).append(callback)
         self._next_sub_id += 1
+        self.subs_by_id[self._next_sub_id] = (event_type, callback)
         return self._next_sub_id
+
+    def unsubscribe(self, sub_id):
+        """Remove just the callback registered under ``sub_id`` (ophyd's
+        per-subscription teardown, used by the device socket)."""
+        self.unsubscribed_ids.append(sub_id)
+        entry = self.subs_by_id.pop(sub_id, None)
+        if entry is None:
+            return
+        event_type, callback = entry
+        callbacks = self.subscriptions.get(event_type)
+        if callbacks and callback in callbacks:
+            callbacks.remove(callback)
+            if not callbacks:
+                self.subscriptions.pop(event_type, None)
+
+    def destroy(self):
+        """Drop every callback and mark the object dead (ophyd's full teardown,
+        used by the PV socket on connection-owned signals)."""
+        self.destroyed = True
+        self.subscriptions.clear()
+        self.subs_by_id.clear()
 
     def clear_sub(self, sub_id):
         self.cleared_subs.append(sub_id)
