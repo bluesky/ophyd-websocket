@@ -1,0 +1,11 @@
+@import 'tailwindcss';
+
+/* finch ships unbundled Tailwind classes in its dist, so Tailwind has to scan
+   it too -- otherwise finch's components render unstyled. */
+@source '../node_modules/@blueskyproject/finch/dist';
+
+html,
+body,
+#root {
+  height: 100%;
+}

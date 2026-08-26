@@ -1,31 +1,43 @@
 """
 Pytest configuration and fixtures for ophyd-websocket tests
 """
-import pytest
 import asyncio
-import time
-import subprocess
+import os
 import socket
+import subprocess
 import sys
+import time
 import warnings
 from pathlib import Path
+
+import pytest
 
 # Filter out expected warnings for cleaner test output
 warnings.filterwarnings("ignore", message="coroutine.*was never awaited", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=pytest.PytestCollectionWarning, message=".*cannot collect test class.*")
-# Suppress specific WebSocket-related warnings
 warnings.filterwarnings("ignore", message="coroutine 'WebSocket.send_json' was never awaited")
 warnings.filterwarnings("ignore", module="ophyd.ophydobj")
 warnings.filterwarnings("ignore", module="_pytest.stash")
 warnings.filterwarnings("ignore", module="_pytest.logging")
 
-# Add the server directory to the Python path so we can import modules
-sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
+TESTS_DIR = Path(__file__).parent
+TEST_STARTUP_FILE = TESTS_DIR / "test_startup.py"
+
+# The test IOC runs on a dedicated Channel Access port so it never collides with
+# a real IOC or a simulated detector already listening on the default 5064.
+# These are set at import time -- before any test module imports ophyd -- because
+# libca reads them once, when the CA context is first created.
+TEST_IOC_CA_PORT = int(os.environ.get("OAS_TEST_IOC_CA_PORT", "5094"))
+os.environ.setdefault("EPICS_CA_ADDR_LIST", f"localhost:{TEST_IOC_CA_PORT}")
+os.environ.setdefault("EPICS_CA_AUTO_ADDR_LIST", "NO")
+os.environ.setdefault("EPICS_CA_SERVER_PORT", str(TEST_IOC_CA_PORT))
+
 
 def is_port_in_use(port):
     """Check if a port is already in use"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
+        return s.connect_ex(("localhost", port)) == 0
+
 
 @pytest.fixture(scope="session")
 def event_loop():
@@ -34,28 +46,108 @@ def event_loop():
     yield loop
     loop.close()
 
-@pytest.fixture(scope="session")  
+
+@pytest.fixture(autouse=True)
+def _isolate_module_state():
+    """Reset the module-level state the routers keep between requests.
+
+    ``core_api.pv_dict`` and the camera/TIFF shared-worker registries are
+    process globals; leaking them across tests makes ordering matter.
+    """
+    from ophyd_websocket.routers import camera_shared_socket, core_api, tiff_socket
+
+    core_api.pv_dict.clear()
+    camera_shared_socket._workers.clear()
+    tiff_socket._workers.clear()
+    yield
+    core_api.pv_dict.clear()
+    camera_shared_socket._workers.clear()
+    tiff_socket._workers.clear()
+
+
+@pytest.fixture
+def registry():
+    """The real global device registry, restored to its prior contents after."""
+    from ophyd_websocket.device_registry import device_registry
+
+    saved_devices = dict(device_registry._devices)
+    saved_dir = device_registry._startup_dir
+    device_registry.clear()
+    yield device_registry
+    device_registry._devices.clear()
+    device_registry._devices.update(saved_devices)
+    device_registry._startup_dir = saved_dir
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    """Swap the registry used by the routers for an in-memory fake."""
+    from ophyd_websocket.routers import core_api, device_socket
+
+    from .fakes import FakeRegistry
+
+    fake = FakeRegistry()
+    monkeypatch.setattr(core_api, "device_registry", fake)
+    monkeypatch.setattr(device_socket, "device_registry", fake)
+    return fake
+
+
+@pytest.fixture
+def app():
+    """The FastAPI app with a test-friendly environment."""
+    os.environ.setdefault("OAS_REQUIRE_QSERVER", "false")
+    from ophyd_websocket.server import app as fastapi_app
+
+    return fastapi_app
+
+
+@pytest.fixture
+def client(app):
+    """Synchronous TestClient (supports both HTTP and WebSocket requests).
+
+    The lifespan is *not* run, so no devices are auto-loaded and no startup
+    directory side effects leak into the test.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+async def async_client(app):
+    """httpx AsyncClient wired straight to the ASGI app."""
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture(scope="session")
 def test_ioc():
     """Start test IOC for the test session"""
-    # Skip if caproto not available
     pytest.importorskip("caproto")
-    
-    ioc_port = 5064
-    
-    # Check if port is already in use
+
+    ioc_port = TEST_IOC_CA_PORT
+
     if is_port_in_use(ioc_port):
         print(f"Port {ioc_port} already in use, assuming IOC is running")
         yield
         return
-    
-    # Start test IOC in subprocess
-    test_ioc_path = Path(__file__).parent / "test_ioc.py"
-    python_exe = sys.executable
-    process = subprocess.Popen([
-        python_exe, str(test_ioc_path)
-    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # Wait for IOC to start
+
+    test_ioc_path = TESTS_DIR / "test_ioc.py"
+    ioc_env = dict(os.environ)
+    ioc_env["EPICS_CA_SERVER_PORT"] = str(ioc_port)
+    ioc_env.pop("EPICS_CA_ADDR_LIST", None)
+    ioc_env.pop("EPICS_CA_AUTO_ADDR_LIST", None)
+    process = subprocess.Popen(
+        [sys.executable, str(test_ioc_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=ioc_env,
+    )
+
     for _ in range(30):  # Wait up to 3 seconds
         if is_port_in_use(ioc_port):
             break
@@ -63,14 +155,15 @@ def test_ioc():
     else:
         process.terminate()
         stdout, stderr = process.communicate()
-        raise RuntimeError(f"Test IOC failed to start:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}")
-    
+        raise RuntimeError(
+            f"Test IOC failed to start:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}"
+        )
+
     print(f"Test IOC started on port {ioc_port}")
-    
+
     try:
         yield
     finally:
-        # Clean up
         process.terminate()
         try:
             process.wait(timeout=5)
@@ -78,112 +171,107 @@ def test_ioc():
             process.kill()
         print("Test IOC stopped")
 
+
 @pytest.fixture
 def test_devices():
-    """Create test device startup file for registry testing"""
-    import sys
-    from pathlib import Path
-    
-    # Add server directory to path
-    server_path = Path(__file__).parent.parent / "server"
-    if str(server_path) not in sys.path:
-        sys.path.insert(0, str(server_path))
-    
-    from device_registry import DeviceRegistry
-    
-    # Define test devices in memory (without needing file)
+    """Device names loaded from an in-memory startup file"""
+    import tempfile
+
+    from ophyd_websocket.device_registry import DeviceRegistry
+
     test_device_code = '''
 from ophyd import EpicsSignal, EpicsMotor, Device, Component
 
-# Simple signals for basic testing
 m1 = EpicsSignal("IOC:m1", name="m1")
-m2 = EpicsSignal("IOC:m2", name="m2") 
+m2 = EpicsSignal("IOC:m2", name="m2")
 detector_counts = EpicsSignal("IOC:detector:counts", name="detector_counts")
 
-# EpicsMotor for advanced testing
 m2_motor = EpicsMotor("IOC:m2:", name="m2_motor")
 
-# Custom device
 class SimpleDetector(Device):
     counts = Component(EpicsSignal, "counts")
 
 detector = SimpleDetector("IOC:detector:", name="detector")
 
-# Private signal (should be ignored by registry)
 _private = EpicsSignal("IOC:private", name="_private")
 '''
-    
-    # Create temporary file
-    import tempfile
-    import os
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(test_device_code)
         temp_file = f.name
-    
+
     try:
-        # Load devices from temporary file
-        registry = DeviceRegistry()
-        registry.load_startup_files(temp_file)
-        
-        yield registry.list_devices()
+        local_registry = DeviceRegistry()
+        local_registry.load_startup_files(temp_file)
+        yield local_registry.list_devices()
     finally:
-        # Clean up temporary file
         os.unlink(temp_file)
+
 
 @pytest.fixture
 async def fastapi_client():
-    """Create FastAPI test client"""
-    import os
-    import sys
-    from pathlib import Path
+    """Create FastAPI test client against the real startup file"""
     from httpx import ASGITransport, AsyncClient
-    
-    # Add server directory to path
-    server_path = Path(__file__).parent.parent / "server"
-    if str(server_path) not in sys.path:
-        sys.path.insert(0, str(server_path))
-    
-    from server import app
-    
-    # Set test environment variables
-    os.environ['OAS_STARTUP_DIR'] = str(Path(__file__).parent / 'test_startup.py')
-    os.environ['OAS_HOST'] = '127.0.0.1'
-    os.environ['OAS_PORT'] = '8001'  # Different from default to avoid conflicts
-    os.environ['OAS_REQUIRE_QSERVER'] = 'false'
-    
+
+    os.environ["OAS_STARTUP_DIR"] = str(TEST_STARTUP_FILE)
+    os.environ["OAS_HOST"] = "127.0.0.1"
+    os.environ["OAS_PORT"] = "8001"
+    os.environ["OAS_REQUIRE_QSERVER"] = "false"
+
+    from ophyd_websocket.server import app
+
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
 
 @pytest.fixture
 def websocket_client():
-    """Create WebSocket test client"""
-    import sys
-    import os
-    from pathlib import Path
+    """TestClient with the real EPICS-backed devices from ``test_startup.py``."""
     from fastapi.testclient import TestClient
-    
-    # Add server directory to path
-    server_path = Path(__file__).parent.parent / "server"
-    if str(server_path) not in sys.path:
-        sys.path.insert(0, str(server_path))
-    
-    # Set test environment
-    startup_file = Path(__file__).parent / 'test_startup.py'
-    os.environ['OAS_STARTUP_DIR'] = str(startup_file)
-    os.environ['OAS_REQUIRE_QSERVER'] = 'false'
-    os.environ['EPICS_CA_ADDR_LIST'] = 'localhost:5064'
-    os.environ['EPICS_CA_AUTO_ADDR_LIST'] = 'NO'
-    
-    # Import server and device registry
-    from server import app
-    from device_registry import device_registry
-    
-    # Load devices from startup file
-    if startup_file.exists():
-        device_registry.load_startup_files(str(startup_file))
+
+    os.environ["OAS_STARTUP_DIR"] = str(TEST_STARTUP_FILE)
+    os.environ["OAS_REQUIRE_QSERVER"] = "false"
+
+    from ophyd_websocket.device_registry import device_registry
+    from ophyd_websocket.server import app
+
+    if TEST_STARTUP_FILE.exists():
+        device_registry.load_startup_files(str(TEST_STARTUP_FILE))
         print(f"WebSocket client: Loaded {len(device_registry.list_devices())} devices for testing")
-    
-    with TestClient(app) as client:
-        yield client
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Tear Channel Access down cleanly at the very end of the session.
+
+    The EPICS-backed devices in ``test_startup.py`` (and the signals the socket
+    handlers open) keep pyepics CA channels -- and the background threads that
+    fetch their control/time metadata -- alive for the whole session. If the
+    interpreter's atexit hook finalizes libca while one of those threads is
+    mid-get, the process segfaults: every test passes but the run exits 139 and
+    the CI job fails. It shows up on the Linux runner, not macOS, because the
+    thread/finalizer interleaving differs.
+
+    Stopping ophyd's dispatcher and finalizing libca here -- while the
+    interpreter is still healthy -- makes the later atexit finalize a no-op and
+    removes the race. Everything is best-effort: on the IOC-free suite CA was
+    never initialised, so both calls are harmless no-ops.
+    """
+    try:
+        import ophyd
+
+        dispatcher = ophyd.get_cl().get_dispatcher()
+        if dispatcher is not None:
+            dispatcher.stop()
+    except Exception:
+        pass
+
+    try:
+        import epics
+
+        epics.ca.finalize_libca()
+    except Exception:
+        pass

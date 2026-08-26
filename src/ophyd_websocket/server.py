@@ -8,14 +8,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import all the routers
-from routers.pv_socket import router as pv_socket_router
-from routers.camera_socket import router as camera_socket_router  
-from routers.qs_console_socket import router as qs_console_socket_router
-from routers.core_api import router as core_api_router
-from routers.device_socket import router as device_socket_router
+from ophyd_websocket.routers.pv_socket import router as pv_socket_router
+from ophyd_websocket.routers.camera_socket import router as camera_socket_router
+from ophyd_websocket.routers.camera_shared_socket import router as camera_shared_socket_router
+from ophyd_websocket.routers.tiff_socket import router as tiff_socket_router
+from ophyd_websocket.routers.qs_console_socket import router as qs_console_socket_router
+from ophyd_websocket.routers.core_api import router as core_api_router
+from ophyd_websocket.routers.device_socket import router as device_socket_router
 
 # Import device registry
-from device_registry import device_registry
+from ophyd_websocket.device_registry import device_registry
 
 # Configure logging
 _log_level = getattr(logging, os.getenv("OAS_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -165,14 +167,20 @@ async def lifespan(app: FastAPI):
     
     if startup_dir:
         logger.info(f"[LIFESPAN] Setting startup directory in device registry: {startup_dir}")
-        device_registry.set_startup_dir(startup_dir)
+        device_registry.set_startup_dir(startup_dir, auto_load=True)
+        loaded_devices = device_registry.list_devices()
+        logger.info(f"[LIFESPAN] Auto-loaded devices from startup directory: {loaded_devices}")
+        if loaded_devices:
+            logger.info(f"[LIFESPAN] Device names loaded: {', '.join(loaded_devices)}")
+        else:
+            logger.warning("[LIFESPAN] No devices were loaded from startup directory")
     else:
         logger.info("[LIFESPAN] No startup directory found in environment")
     
     # Verify the startup directory is properly set
     stored_dir = device_registry.get_startup_dir()
     logger.info(f"[LIFESPAN] Final startup directory in registry: {stored_dir}")
-    logger.info("[LIFESPAN] Server ready - use /load-devices endpoint to load devices")
+    logger.info("[LIFESPAN] Server startup complete; devices are loaded")
     
     yield
     
@@ -241,6 +249,8 @@ app.add_middleware(
 # Include all routers with appropriate prefixes and tags
 app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(camera_shared_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(tiff_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router, prefix="/api/v1")
@@ -273,6 +283,23 @@ def list_websockets():
                 "example_url": f"{BASE_WS_URL}/api/v1/camera-socket",
                 "format": "Base64 encoded JPEG images"
             },
+            "camera_socket_shared": {
+                "endpoint": "/api/v1/camera-socket-shared",
+                "description": "Live image streaming with shared decode/compress workers keyed by camera args",
+                "example_url": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
+                "format": "Binary JPEG images"
+            },
+            "tiff_socket": {
+                "endpoint": "/api/v1/tiff-socket",
+                "description": "Streams a detector's most recently saved TIFF file, re-decoded whenever "
+                               "<prefix>:TIFF1:FullFileName_RBV changes",
+                "example_url": f"{BASE_WS_URL}/api/v1/tiff-socket",
+                "format": "Binary JPEG images",
+                "example_messages": {
+                    "init_example": {"prefix": "SIMTIFF1"},
+                    "toggle_log_example": {"toggleLogNormalization": True}
+                }
+            },
             "qs_console_socket": {
                 "endpoint": "/api/v1/qs-console-socket",
                 "description": "Queue server console output",
@@ -304,6 +331,8 @@ def read_root():
             "websockets": {
                 "pv_socket": f"{BASE_WS_URL}/api/v1/pv-socket",
                 "camera_socket": f"{BASE_WS_URL}/api/v1/camera-socket",
+                "camera_socket_shared": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
+                "tiff_socket": f"{BASE_WS_URL}/api/v1/tiff-socket",
                 "qs_console_socket": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },
@@ -317,24 +346,24 @@ def read_root():
         "description": "This server provides WebSocket endpoints for EPICS PV monitoring, camera streaming, queue server communication, and REST API endpoints for device management."
     }
 
-if __name__ == "__main__":
-    # Parse command line arguments
+def main():
     args = parse_arguments()
-    
+
     logger.info(f"[SERVER] Parsed startup directory argument: {args.startup_dir}")
-    
-    # Store startup directory in environment variable so it persists across uvicorn reloads
+
     if args.startup_dir:
         logger.info(f"[SERVER] Setting OAS_STARTUP_DIR environment variable: {args.startup_dir}")
         os.environ["OAS_STARTUP_DIR"] = args.startup_dir
     else:
         logger.info("[SERVER] No startup directory provided")
-    
-    # Get configuration from environment variables
+
     port = int(OAS_PORT)
-    host = os.getenv("OAS_HOST", "0.0.0.0")  # Use different default for server binding
-    
-    # Log comprehensive startup information (before device loading)
+    host = os.getenv("OAS_HOST", "0.0.0.0")
+
     log_environment_and_startup_info(args.startup_dir)
-    
-    uvicorn.run("server:app", host=host, port=port, reload=True)
+
+    uvicorn.run("ophyd_websocket.server:app", host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

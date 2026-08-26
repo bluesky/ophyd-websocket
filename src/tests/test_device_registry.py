@@ -97,6 +97,25 @@ motor2 = EpicsSignal("IOC:m2", name="motor2")
         assert "motor1" in devices
         assert "motor2" in devices
 
+def test_set_startup_dir_auto_loads_by_default():
+    """Test that setting a startup directory immediately loads devices."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_content = '''
+from ophyd import EpicsSignal
+motor1 = EpicsSignal("IOC:m1", name="motor1")
+'''
+        startup_file = Path(temp_dir) / "devices.py"
+        startup_file.write_text(file_content)
+
+        registry = DeviceRegistry()
+        registry.clear()
+        registry.set_startup_dir(temp_dir)
+
+        devices = registry.list_devices()
+        assert "motor1" in devices
+        assert len(devices) == 1
+
+
 def test_get_device_by_name():
     """Test retrieving specific device by name"""
     test_device_code = '''

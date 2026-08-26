@@ -1,0 +1,87 @@
+name: tests
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every test runs against fakes or the local caproto test IOC, which listens
+  # on a dedicated CA port. Pinning the address list keeps stray Channel Access
+  # broadcasts from leaving the runner.
+  EPICS_CA_AUTO_ADDR_LIST: "NO"
+  EPICS_CA_ADDR_LIST: "localhost:5094"
+  EPICS_CA_SERVER_PORT: "5094"
+  OAS_REQUIRE_QSERVER: "false"
+
+jobs:
+  unit:
+    name: unit and socket tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the project and its dev dependencies
+        run: uv sync --python ${{ matrix.python-version }} --group dev
+
+      # These tests replace ophyd's EPICS classes with in-memory fakes, so they
+      # need no IOC and no working libca connection.
+      - name: Run tests that do not need an IOC
+        run: uv run --python ${{ matrix.python-version }} pytest -m "not ioc" -v --timeout=120
+
+  ioc-integration:
+    name: Channel Access integration (caproto IOC)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the project and its dev dependencies
+        run: uv sync --python 3.12 --group dev
+
+      # The conftest test_ioc fixture starts src/tests/test_ioc.py itself; this
+      # only checks that libca loaded and can reach a caproto server at all,
+      # so a CA/network problem fails here instead of inside every test.
+      - name: Verify Channel Access works on the runner
+        run: |
+          uv run python -m caproto.ioc_examples.simple --prefix "CI:" --list-pvs &
+          IOC_PID=$!
+          sleep 3
+          uv run python -c "
+          from ophyd import EpicsSignal
+          signal = EpicsSignal('CI:A', name='a')
+          signal.wait_for_connection(timeout=15)
+          print('connected, value =', signal.get())
+          "
+          kill $IOC_PID
+
+      - name: Run IOC-backed tests
+        run: uv run pytest -m ioc -v --timeout=120
+
+  full-suite:
+    name: full suite (both jobs green)
+    runs-on: ubuntu-latest
+    needs: [unit, ioc-integration]
+    steps:
+      - name: Report
+        run: echo "unit and IOC integration suites passed"

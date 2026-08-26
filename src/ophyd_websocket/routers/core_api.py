@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from ophyd import EpicsSignal
 
 # Import queue server utilities
-from device_registry import device_registry
-from queue_safety import queue_safety_required, get_queue_server_status
+from ophyd_websocket.device_registry import device_registry
+from ophyd_websocket.queue_safety import queue_safety_required, get_queue_server_status
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -191,10 +191,10 @@ async def set_device_value(instruction: OphydDeviceInstruction, response: Respon
             set_result.wait(timeout=instruction.timeout)
             return {
                 "success": True,
-                "message": f"Successfully set {target_name} to {instruction.value} (with timeout {instruction.timeout}s)",
+                "message": f"Successfully set {target_name} to {instruction.set_value} (with timeout {instruction.timeout}s)",
                 "device": instruction.device,
                 "component": instruction.component,
-                "value": instruction.value,
+                "value": instruction.set_value,
                 "timeout": instruction.timeout
             }
         else:

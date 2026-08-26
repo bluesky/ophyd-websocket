@@ -17,44 +17,33 @@ Ophyd async is not currently supported.
 
 A single websocket instance can hold any number of device subscriptions.
 
+## Developing against simulated hardware
+
+For running the project locally against a simulated beamline — the docker
+compose test stack, the simulated IOCs, the ophyd devices, and the frontend —
+see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 # Installation
-```bash 
-git clone https://github.com/bluesky/ophyd-websocket.git 
+```bash
+pip install ophyd-websocket
 ```
 
-Install requirements
+# Starting the Server
+
 ```bash
-#/ophyd-websocket
-uv sync
+ophyd-websocket
 ```
 
-This project utilizes uv. If you wish to install with another method, then in your Python environment of choice run:
+With custom host and port:
 ```bash
-#optional instead of uv
-python -m pip install -e .
-```
-Then for all reference commands, omit the 'uv run' command.
-
-# Starting the Websocket
-
-Start the websocket server
-```bash
-#/ophyd-websocket
-uv run python src/ophyd_websocket/server.py
-```
-
-Start the websocket server with host and port set in command line
-```bash
-#/ophyd-websocket
-OAS_PORT=8001 OAS_HOST=0.0.0.0 uv run python src/ophyd_websocket/server.py
+OAS_PORT=8001 OAS_HOST=0.0.0.0 ophyd-websocket
 ```
 
 # Using device-socket for Ophyd devices
 ## Startup Directory
 Any use of the device-socket path will require the server to start with a startup directory.
 ```bash
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+ophyd-websocket --startup-dir /path/to/devices.py
 ```
 
 By default, when the server starts up it will try to instantiate the Ophyd devices. If the startup files change, reload the devices by making a POST request to /api/v1/load-devices.
@@ -192,21 +181,60 @@ Subscribe to real-time updates from a device in the registry.
 }
 ```
 
+Subscribe to multiple devices in a single message using the `devices` key:
+```json
+{
+    "action": "subscribe",
+    "devices": ["motor1", "motor2", "detector1"]
+}
+```
+
+The server responds with a summary for multi-device subscriptions:
+```json
+{
+    "action": "subscribe",
+    "subscribed": ["motor1", "motor2"],
+    "already_subscribed": ["detector1"],
+    "failed": []
+}
+```
+
 #### subscribeSafely
-Subscribe only if the device can be successfully connected to.
+Subscribe only if the device can be successfully connected to. Supports both single and multiple devices.
 ```json
 {
     "action": "subscribeSafely", 
     "device": "motor1"
 }
 ```
+```json
+{
+    "action": "subscribeSafely",
+    "devices": ["motor1", "motor2"]
+}
+```
 
 #### unsubscribe
-Stop receiving updates from a device.
+Stop receiving updates from a device. Supports both single and multiple devices.
 ```json
 {
     "action": "unsubscribe",
     "device": "motor1"
+}
+```
+```json
+{
+    "action": "unsubscribe",
+    "devices": ["motor1", "motor2"]
+}
+```
+
+The server responds with a summary:
+```json
+{
+    "action": "unsubscribe",
+    "unsubscribed": ["motor1", "motor2"],
+    "not_subscribed": []
 }
 ```
 
@@ -258,12 +286,36 @@ Subscribe to any EPICS PV (creates connection if it doesn't exist).
 }
 ```
 
+Subscribe to multiple PVs in a single message using the `pvs` key:
+```json
+{
+    "action": "subscribe",
+    "pvs": ["IOC:m1", "IOC:m2", "IOC:m3"]
+}
+```
+
+The server responds with a summary for multi-PV subscriptions:
+```json
+{
+    "action": "subscribe",
+    "subscribed": ["IOC:m1", "IOC:m2"],
+    "already_subscribed": ["IOC:m3"],
+    "failed": []
+}
+```
+
 #### subscribeSafely
-Subscribe only if the PV can be successfully connected to.
+Subscribe only if the PV can be successfully connected to. Supports both single and multiple PVs.
 ```json
 {
     "action": "subscribeSafely",
     "pv": "IOC:m1"
+}
+```
+```json
+{
+    "action": "subscribeSafely",
+    "pvs": ["IOC:m1", "IOC:m2"]
 }
 ```
 
@@ -277,11 +329,26 @@ Subscribe to a PV in read-only mode.
 ```
 
 #### unsubscribe
-Stop receiving updates from a PV.
+Stop receiving updates from a PV. Supports both single and multiple PVs.
 ```json
 {
     "action": "unsubscribe", 
     "pv": "IOC:m1"
+}
+```
+```json
+{
+    "action": "unsubscribe",
+    "pvs": ["IOC:m1", "IOC:m2"]
+}
+```
+
+The server responds with a summary:
+```json
+{
+    "action": "unsubscribe",
+    "unsubscribed": ["IOC:m1", "IOC:m2"],
+    "not_subscribed": []
 }
 ```
 
@@ -321,10 +388,10 @@ PV-socket responses focus on individual PV information:
 
 | Action | device-socket | pv-socket | Key Differences |
 |--------|---------------|-----------|-----------------|
-| **subscribe** | ✅ Subscribe to device from registry | ✅ Subscribe to any EPICS PV | Device-socket requires device to exist in registry; pv-socket creates connection on-demand |
-| **subscribeSafely** | ✅ Subscribe with connection validation | ✅ Subscribe with connection validation | Both validate connection, but device-socket checks registry first |
+| **subscribe** | ✅ Subscribe to device(s) from registry | ✅ Subscribe to any EPICS PV(s) | Use `"device"`/`"devices"` for device-socket; `"pv"`/`"pvs"` for pv-socket |
+| **subscribeSafely** | ✅ Subscribe with connection validation | ✅ Subscribe with connection validation | Both support single or multiple targets |
 | **subscribeReadOnly** | ❌ Not available | ✅ Read-only subscription | Only pv-socket supports explicit read-only mode (currently) |
-| **unsubscribe** | ✅ Stop device updates | ✅ Stop PV updates | Same functionality, different parameter names |
+| **unsubscribe** | ✅ Stop device updates (single or multiple) | ✅ Stop PV updates (single or multiple) | Use `"device"`/`"devices"` or `"pv"`/`"pvs"` |
 | **set** | ✅ Set device value | ✅ Set PV value | Device-socket may target complex devices; pv-socket targets individual PVs |
 | **refresh** | ✅ Refresh all subscribed devices | ✅ Refresh all subscribed PVs | Device-socket may refresh multiple signals per device |
 
@@ -406,13 +473,13 @@ export OAS_HOST=0.0.0.0
 export OAS_PORT=8001
 export OAS_STARTUP_DIR=/path/to/devices
 export QSERVER_HTTP_SERVER_HOST=queue-server.local
-uv run python src/ophyd_websocket/server.py
+ophyd-websocket
 
 # Using command line arguments
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+ophyd-websocket --startup-dir /path/to/devices.py
 
 # Using both (environment variables take precedence)
-OAS_PORT=8002 uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices
+OAS_PORT=8002 ophyd-websocket --startup-dir /path/to/devices
 ```
 
 ### Device Loading
@@ -422,7 +489,7 @@ You can load up predefined Ophyd devices with a POST request to `http://localhos
 These predefined Ophyd devices should live in any python file that can be accessed during server startup. Pass a `--startup-dir` arg to the server with your file or folder.
 
 ```bash
-uv run python src/ophyd_websocket/server.py --startup-dir /path/to/devices.py
+ophyd-websocket --startup-dir /path/to/devices.py
 ```
 Then in your python file instantiate your Ophyd devices, which will then be available when making API calls or websocket subscriptions to devices.
 
@@ -693,26 +760,5 @@ docker run -p 8001:8001 ophyd-websocket
 
 # Development
 
-Install with dev dependencies using uv
-```bash
-# /ophyd-websocket
-pip install uv        # one-time: install uv into your environment
-uv sync --dev         # installs all dependencies including dev group
-```
-
-Running Tests
-
-```bash
-uv run pytest
-```
-
-Alternative installation without uv
-```bash
-#example conda environment
-conda create -n ophyd_websocket python=3.12
-conda activate ophyd_websocket
-
-#install from pyproject.toml
-python -m pip install -e .
-python -m pip install -e ".[dev]" #dev dependencies
-```
+For building from source, running against simulated hardware, and the docker
+compose test stack, see [DEVELOPMENT.md](DEVELOPMENT.md).
