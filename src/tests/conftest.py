@@ -242,3 +242,36 @@ def websocket_client():
 
     with TestClient(app) as test_client:
         yield test_client
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Tear Channel Access down cleanly at the very end of the session.
+
+    The EPICS-backed devices in ``test_startup.py`` (and the signals the socket
+    handlers open) keep pyepics CA channels -- and the background threads that
+    fetch their control/time metadata -- alive for the whole session. If the
+    interpreter's atexit hook finalizes libca while one of those threads is
+    mid-get, the process segfaults: every test passes but the run exits 139 and
+    the CI job fails. It shows up on the Linux runner, not macOS, because the
+    thread/finalizer interleaving differs.
+
+    Stopping ophyd's dispatcher and finalizing libca here -- while the
+    interpreter is still healthy -- makes the later atexit finalize a no-op and
+    removes the race. Everything is best-effort: on the IOC-free suite CA was
+    never initialised, so both calls are harmless no-ops.
+    """
+    try:
+        import ophyd
+
+        dispatcher = ophyd.get_cl().get_dispatcher()
+        if dispatcher is not None:
+            dispatcher.stop()
+    except Exception:
+        pass
+
+    try:
+        import epics
+
+        epics.ca.finalize_libca()
+    except Exception:
+        pass
