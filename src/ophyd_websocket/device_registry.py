@@ -3,7 +3,6 @@ Device Registry for managing Ophyd devices across the application and Queue Serv
 """
 import os
 import sys
-import importlib.util
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, TypeAlias, Union
@@ -218,43 +217,49 @@ class DeviceRegistry:
         
         # Add appropriate directory to Python path temporarily
         sys.path.insert(0, sys_path_to_add)
-        
+
         try:
+            # Run every file in ONE shared namespace, in sorted (lexical)
+            # order -- the same model bluesky-queueserver uses for a
+            # startup directory. A numbered startup file is free to build
+            # on names defined by an earlier one (e.g. an "00_base.py"
+            # exposing a helper that "01_motors.py" calls); loading each
+            # file as an independent module would make those names
+            # undefined and raise NameError.
+            namespace: Dict[str, Any] = {}
             for py_file in sorted(python_files):
-                self._load_file(py_file)
+                self._load_file(py_file, namespace)
         finally:
             # Remove directory from Python path
             if sys_path_to_add in sys.path:
                 sys.path.remove(sys_path_to_add)
-        
+
         logger.info(f"Device registry loaded with {len(self._devices)} devices: {list(self._devices.keys())}")
-    
-    def _load_file(self, file_path: Path) -> None:
-        """Load a single Python file and extract Ophyd devices"""
+
+    def _load_file(self, file_path: Path, namespace: Dict[str, Any]) -> None:
+        """Exec a single startup file into ``namespace`` and extract Ophyd devices.
+
+        ``namespace`` is shared across every file in a startup directory
+        (see ``load_startup_files``), so names defined by an earlier file
+        are visible here.
+        """
         try:
             logger.info(f"Loading startup file: {file_path.name}")
-            
-            # Create module spec and load the module
-            spec = importlib.util.spec_from_file_location(file_path.stem, file_path)
-            if spec is None:
-                raise ImportError(f"Could not create module spec for {file_path}")
-            
-            module = importlib.util.module_from_spec(spec)
-            if module is None:
-                raise ImportError(f"Could not create module from spec for {file_path}")
-            
-            # Execute the module
-            spec.loader.exec_module(module)
-            
-            # Extract Ophyd devices from module namespace
+
+            namespace["__file__"] = str(file_path)
+            source = file_path.read_text()
+            code = compile(source, str(file_path), "exec")
+            exec(code, namespace)
+
+            # Extract Ophyd devices newly added to the shared namespace
             devices_found = 0
-            for name, obj in vars(module).items():
-                if self._is_ophyd_device(obj, name):
+            for name, obj in namespace.items():
+                if self._is_ophyd_device(obj, name) and self._devices.get(name) is not obj:
                     self.add_device(name, obj)
                     devices_found += 1
-            
+
             logger.info(f"Found {devices_found} devices in {file_path.name}")
-            
+
         except Exception as e:
             logger.error(f"Error loading startup file {file_path}: {str(e)}")
             raise  # Re-raise to allow caller to handle
