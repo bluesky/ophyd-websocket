@@ -1,12 +1,12 @@
 import asyncio
 import json
-import numpy as np
 import logging
-from ophyd import EpicsSignalRO, EpicsSignal, Device, EpicsMotor
-from ophyd.pseudopos import PseudoPositioner
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from ophyd_websocket.device_adapters import adapt_device
+from ophyd_websocket.device_adapters.classic import PseudoPositioner
 from ophyd_websocket.device_registry import device_registry
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -33,89 +33,38 @@ async def websocket_endpoint(websocket: WebSocket):
     except RuntimeError:
         loop = asyncio.get_event_loop()
 
-    def addCallbacks(device_name, device):
-        connection_state = {"connected": None, "last_update": 0}
-        # (object, cid) pairs so we can later remove exactly the callbacks this
-        # connection registered, without touching a shared registry device's
-        # own callbacks or those of any other connection.
-        handles = []
+    # Per-connection state: exactly the devices *this* websocket subscribed
+    # to, so closing one connection never touches another connection's
+    # subscriptions on the same (registry-owned, shared) device.
+    devices = {}       # device_name -> raw device object
+    adapters = {}      # device_name -> DeviceAdapter
+    sub_handles = {}    # device_name -> opaque handle returned by adapter.subscribe()
 
-        def callbackMd(**kwargs):
+    def push(device_name):
+        def _push(message):
             if loop.is_closed():
                 return
-            message = {key: value for key, value in kwargs.items()}
-            message['obj'] = device_name
-            message['device'] = device_name
-            message['signal'] = kwargs.get('obj', None).name if kwargs.get('obj', None) else None
-
-            if message.get('connected') is not None:
-                current_connection = message.get('connected')
-                if current_connection != connection_state["connected"]:
-                    if current_connection == False:
-                        connection_state["connected"] = current_connection
-                        connection_state["last_update"] = time.time()
-                        try:
-                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-                        except (WebSocketDisconnect, RuntimeError):
-                            logger.debug(f"Connection closed while sending update for device: {device_name}")
-                    if current_connection == True:
-                        try:
-                            asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
-                        except (WebSocketDisconnect, RuntimeError):
-                            logger.debug(f"Connection closed while sending update for device: {device_name}")
-
-        def callbackValue(value, timestamp, **kwargs):
-            if loop.is_closed():
-                return
-            if isinstance(value, np.ndarray) and value.dtype.kind in ['i', 'u']:
-                try:
-                    cleaned_array = value[value != 0]
-                    if len(cleaned_array) > 0:
-                        string_value = ''.join(chr(x) for x in cleaned_array)
-                        value = string_value
-                        logger.debug(f"Converted array to string for device {device_name}: {value}")
-                except (ValueError, OverflowError):
-                    pass
-            if isinstance(value, tuple):
-                value = value[0]
-            message = {
-                        "device": device_name,
-                        "value": value,
-                        "timestamp": timestamp,
-                        "connected": device.connected,
-                        "read_access": getattr(device, 'read_access', None),
-                        "write_access": getattr(device, 'write_access', None),
-                        "signal": kwargs.get('obj', None).name if kwargs.get('obj', None) else None,
-                    }
+            message = dict(message)
+            message["device"] = device_name
             try:
                 asyncio.run_coroutine_threadsafe(websocket.send_json(message), loop)
             except (WebSocketDisconnect, RuntimeError):
                 logger.debug(f"Connection closed while sending update for device: {device_name}")
 
-        def recursively_subscribe(device, name=None, parent=None):
-            if isinstance(device, (EpicsSignal, EpicsSignalRO)):
-                handles.append((device, device.subscribe(callbackMd, event_type='meta')))
-                handles.append((device, device.subscribe(callbackValue, event_type='value')))
-            elif isinstance(device, EpicsMotor):
-                handles.append((device, device.subscribe(callbackValue, event_type='readback')))
-                for signal in device.walk_signals():
-                    handles.append((signal.item, signal.item.subscribe(callbackMd, event_type='meta')))
-            elif isinstance(device, PseudoPositioner):
-                handles.append((device, device.subscribe(callbackValue, event_type='readback')))
-            else:
-                for name in device.component_names:
-                    recursively_subscribe(getattr(device, name))
+        return _push
 
-        recursively_subscribe(device)
-        subscriptions[device_name] = device
-        sub_handles[device_name] = handles
-
-    async def _try_subscribe_one(device_name, device, requireConnection):
+    async def _try_subscribe_one(device_name, device, adapter, requireConnection):
         """Attempt to subscribe a single device. Returns error string on failure, None on success."""
         try:
             if requireConnection:
-                await loop.run_in_executor(None, device.get)
-            addCallbacks(device_name, device)
+                if hasattr(device, "get"):
+                    await loop.run_in_executor(None, device.get)
+                else:
+                    await adapter.read()
+            handle = await adapter.subscribe(push(device_name))
+            devices[device_name] = device
+            adapters[device_name] = adapter
+            sub_handles[device_name] = handle
             logger.debug(f"Successfully subscribed to device: {device_name}")
             return None
         except Exception as e:
@@ -140,10 +89,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
         already = []
         not_found = []
-        worklist = []  # list of (name, device)
+        worklist = []  # list of (name, device, adapter)
 
         for name in names:
-            if name in subscriptions:
+            if name in devices:
                 logger.debug(f"Device '{name}' already subscribed, skipping")
                 already.append(name)
                 continue
@@ -156,29 +105,29 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 not_found.append({"device": name, "error": "not found in device registry"})
                 continue
-            worklist.append((name, device))
+            worklist.append((name, device, adapt_device(device)))
 
         # First pass
         failures = []
         subscribed = []
-        for name, device in worklist:
+        for name, device, adapter in worklist:
             logger.debug(f"Attempting subscription to device: {name}")
-            err = await _try_subscribe_one(name, device, requireConnection)
+            err = await _try_subscribe_one(name, device, adapter, requireConnection)
             if err is None:
                 subscribed.append(name)
             else:
-                failures.append((name, device, err))
+                failures.append((name, device, adapter, err))
 
         # Retry pass for failed connections
         if failures:
             logger.debug(
                 f"Retrying {len(failures)} failed subscription(s) after 1s: "
-                f"{[n for n, _, _ in failures]}"
+                f"{[n for n, _, _, _ in failures]}"
             )
             await asyncio.sleep(1.0)
             retry_failures = []
-            for name, device, _ in failures:
-                err = await _try_subscribe_one(name, device, requireConnection)
+            for name, device, adapter, _ in failures:
+                err = await _try_subscribe_one(name, device, adapter, requireConnection)
                 if err is None:
                     subscribed.append(name)
                 else:
@@ -202,19 +151,19 @@ async def websocket_endpoint(websocket: WebSocket):
             f"{len(already)} already subscribed, {len(all_failed)} failed"
         )
 
-    def _teardown_device(device_name):
+    async def _teardown_device_async(device_name):
         """Remove exactly the callbacks this connection registered on a device,
         leaving the (shared, registry-owned) device itself and any other
         connection's subscriptions intact. Returns True if it was subscribed."""
-        handles = sub_handles.pop(device_name, None)
-        subscriptions.pop(device_name, None)
-        if handles is None:
+        handle = sub_handles.pop(device_name, None)
+        adapter = adapters.pop(device_name, None)
+        devices.pop(device_name, None)
+        if handle is None:
             return False
-        for obj, cid in handles:
-            try:
-                obj.unsubscribe(cid)
-            except Exception:
-                logger.debug(f"Error unsubscribing from device {device_name}", exc_info=True)
+        try:
+            await adapter.unsubscribe(handle)
+        except Exception:
+            logger.debug(f"Error unsubscribing from device {device_name}", exc_info=True)
         return True
 
     async def handleUnsubscribe(data):
@@ -231,7 +180,7 @@ async def websocket_endpoint(websocket: WebSocket):
         not_subscribed = []
 
         for device_name in names:
-            if _teardown_device(device_name):
+            if await _teardown_device_async(device_name):
                 unsubscribed.append(device_name)
                 logger.debug(f"Unsubscribed from device: {device_name}")
             else:
@@ -249,8 +198,11 @@ async def websocket_endpoint(websocket: WebSocket):
         )
 
     async def handleRefresh():
-        for device_name, device in subscriptions.items():
-            subscriptions[device_name].get()
+        for device_name, device in devices.items():
+            if hasattr(device, "get"):
+                await loop.run_in_executor(None, device.get)
+            else:
+                await adapters[device_name].read()
         await websocket.send_json({"message": "Refreshed all devices"})
 
     async def handleSet(data):
@@ -258,11 +210,12 @@ async def websocket_endpoint(websocket: WebSocket):
         if not device_name:
             await websocket.send_json({"error": "No device name specified"})
             return
-        if device_name not in subscriptions:
+        if device_name not in devices:
             await websocket.send_json({"error": f"Device {device_name} is not subscribed. Subscribe to device before setting value."})
             return
 
-        device = subscriptions.get(device_name)
+        device = devices.get(device_name)
+        adapter = adapters.get(device_name)
 
         value = data.get("value")
         try:
@@ -279,7 +232,12 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"error": f"Timeout must be a number. Could not set value of {device_name} to {value}"})
             return
 
-        if not isinstance(device, PseudoPositioner) and isinstance(value, (int, float)):
+        if (
+            not isinstance(device, PseudoPositioner)
+            and isinstance(value, (int, float))
+            and hasattr(device, "low_limit")
+            and hasattr(device, "high_limit")
+        ):
             low_limit = device.low_limit
             high_limit = device.high_limit
 
@@ -289,18 +247,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     return
 
         try:
-            if isinstance(value, str):
-                device.put(value, wait=True, timeout=timeout, use_complete=True)
-            else:
-                device.set(value).wait(timeout=timeout)
+            await adapter.set(value, timeout=timeout)
         except Exception as error:
             await websocket.send_json({"error": f"Could not set value of {device_name} to {value}: {str(error)}"})
             return
 
         await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})
-
-    subscriptions = {}
-    sub_handles = {}
 
     try:
         while True:
@@ -347,5 +299,5 @@ async def websocket_endpoint(websocket: WebSocket):
         # Remove every callback this connection registered so no CA monitor
         # keeps firing into a dead event loop after the socket closes.
         for device_name in list(sub_handles):
-            _teardown_device(device_name)
+            await _teardown_device_async(device_name)
         logger.info("WebSocket connection to /device-socket closed.")

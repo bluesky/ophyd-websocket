@@ -112,6 +112,38 @@ the local filesystem, so running natively from the repo root just works. Set
 `SIM_TIFF_ASSETS_DIR` only if you move the sample TIFFs elsewhere.
 
 
+## `ca_context_create` fails with "Unable to allocate additional dynamic memory"
+
+Symptom: starting ophyd-websocket natively (not docker) crashes on startup
+while loading devices, with a traceback ending in `aioca`/`epicscorelibs`:
+
+```
+epicscorelibs.ca.cadef.CAException: Unable to allocate additional dynamic memory
+calling ca_context_create
+```
+
+**Cause: two different `libca` builds loaded into the same process.** Classic
+ophyd devices use `pyepics`, which honors `PYEPICS_LIBCA`/`EPICS_BASE` and will
+load whatever system EPICS install those environment variables point at (e.g.
+a Homebrew/conda EPICS base). ophyd-async devices use `aioca`, which always
+loads its own bundled `libca` from `epicscorelibs`. If your shell exports
+`PYEPICS_LIBCA`/`EPICS_BASE` (for other, unrelated EPICS work on the machine)
+and the process loads both classic and ophyd-async devices, you get two
+independent copies of libca fighting over shared global state — it does not
+reliably fail on the first CA call, but `ca_context_create` erroring out with
+an allocation failure is the most common symptom.
+
+**Fix — unset those variables before running this project natively:**
+
+```bash
+unset PYEPICS_LIBCA EPICS_BASE EPICS_HOST_ARCH EPICS_BASE_HOST_BIN EPICS_BASE_VERSION
+uv run ophyd-websocket --startup-dir=./ophyd_async_devices
+```
+
+This does not affect docker compose — the containers never set those
+variables, so `pyepics` and `aioca` both end up on their own bundled `libca`
+there.
+
 ## The simulated IOC
 
 `caproto/sim_ioc.py` is a caproto `PVGroup`. caproto is a dev dependency of

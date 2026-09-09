@@ -6,11 +6,21 @@ import sys
 import importlib.util
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
-from ophyd import Device, EpicsSignal
+from typing import Dict, Any, List, Optional, TypeAlias, Union
+from ophyd import Device as ClassicDevice
 from ophyd.signal import EpicsSignalBase
+from ophyd_async.core import Device as AsyncDevice
 
 logger = logging.getLogger(__name__)
+
+# Any device object the registry can hold: a classic Ophyd Device/EpicsSignal,
+# or an ophyd-async Device (which also covers its Signal subclasses).
+SupportedDevice: TypeAlias = Union[ClassicDevice, EpicsSignalBase, AsyncDevice]
+
+
+def is_supported_device(obj: Any) -> bool:
+    """Whether ``obj`` is a device/signal instance the registry can hold."""
+    return isinstance(obj, (ClassicDevice, EpicsSignalBase, AsyncDevice))
 
 
 class DeviceRegistry:
@@ -27,7 +37,7 @@ class DeviceRegistry:
                          If None, will use OAS_STARTUP_DIR environment variable.
             auto_load: If True and startup_path is provided, automatically load devices on initialization
         """
-        self._devices: Dict[str, Device] = {}
+        self._devices: Dict[str, SupportedDevice] = {}
         
         # Determine startup path
         if startup_path is None:
@@ -75,14 +85,17 @@ class DeviceRegistry:
         """Check if the registry has been configured with a startup directory"""
         return self._startup_dir is not None
     
-    def get_device(self, name: str) -> Optional[Device]:
+    def get_device(self, name: str) -> Optional[SupportedDevice]:
         """Get a device by name"""
         return self._devices.get(name)
-    
-    def add_device(self, name: str, device: Device) -> None:
+
+    def add_device(self, name: str, device: SupportedDevice) -> None:
         """Add a device to the registry"""
-        if not isinstance(device, (Device, EpicsSignalBase)):
-            raise ValueError(f"Device {name} must be an Ophyd Device or EpicsSignal, got {type(device)}")
+        if not is_supported_device(device):
+            raise ValueError(
+                f"Device {name} must be a classic Ophyd Device/EpicsSignal or an "
+                f"ophyd-async Device, got {type(device)}"
+            )
         
         if name in self._devices:
             logger.warning(f"Device '{name}' already exists in registry, replacing...")
@@ -108,30 +121,39 @@ class DeviceRegistry:
         if not device:
             return None
         
+        is_async = isinstance(device, AsyncDevice)
+
         info = {
             "name": name,
             "type": type(device).__name__,
             "class": f"{type(device).__module__}.{type(device).__name__}",
+            "is_async": is_async,
         }
-        
+
         # Add device-specific information
         if hasattr(device, 'prefix'):
             info["prefix"] = device.prefix
         if hasattr(device, 'connected'):
             info["connected"] = device.connected
-        if hasattr(device, 'describe'):
-            try:
-                info["description"] = device.describe()
-            except Exception as e:
-                info["description_error"] = str(e)
-        
-        # Get current device value
-        if hasattr(device, 'read'):
-            try:
-                info["values"] = device.read()
-            except Exception as e:
-                info["value_error"] = str(e)
-        
+
+        # ophyd-async's describe()/read() are coroutines that must run on
+        # its own event loop (see device_adapters.async_ophyd) -- this
+        # synchronous info lookup can't await them, so it reports the type
+        # only for async devices. Use the REST/WebSocket adapter paths for
+        # live async values.
+        if not is_async:
+            if hasattr(device, 'describe'):
+                try:
+                    info["description"] = device.describe()
+                except Exception as e:
+                    info["description_error"] = str(e)
+
+            if hasattr(device, 'read'):
+                try:
+                    info["values"] = device.read()
+                except Exception as e:
+                    info["value_error"] = str(e)
+
         return info
     
     def get_all_device_info(self) -> Dict[str, Dict[str, Any]]:
@@ -256,9 +278,8 @@ class DeviceRegistry:
         if isinstance(obj, type):
             return False
         
-        # Check if it's an Ophyd device or signal (EpicsSignalBase covers
-        # both EpicsSignal and the read-only EpicsSignalRO)
-        return isinstance(obj, (Device, EpicsSignalBase))
+        # Check if it's a classic Ophyd device/signal or an ophyd-async device
+        return is_supported_device(obj)
 
 
 # Global device registry instance

@@ -124,6 +124,22 @@ async def async_client(app):
         yield ac
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _bluesky_event_loop():
+    """Start Bluesky's background event loop for the whole test session.
+
+    ``ophyd_websocket.async_runtime.run_in_bluesky_loop`` dispatches
+    ophyd-async operations onto this loop via
+    ``call_in_bluesky_event_loop()``, which raises if the loop was never
+    started. Instantiating a ``RunEngine`` starts it as a side effect.
+    """
+    pytest.importorskip("bluesky")
+    from bluesky import RunEngine
+
+    RE = RunEngine()
+    yield RE
+
+
 @pytest.fixture(scope="session")
 def test_ioc():
     """Start test IOC for the test session"""

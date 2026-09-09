@@ -7,6 +7,7 @@ replaced with fakes, so the full subscribe/set/refresh flow runs without EPICS.
 import numpy as np
 import pytest
 
+from ophyd_websocket.device_adapters import classic as classic_adapter
 from ophyd_websocket.routers import device_socket
 
 from .fakes import (
@@ -20,10 +21,11 @@ from .fakes import (
 
 @pytest.fixture(autouse=True)
 def _patch_ophyd_types(monkeypatch):
-    """``recursively_subscribe`` dispatches on these module globals."""
-    monkeypatch.setattr(device_socket, "EpicsSignal", FakeSignal)
-    monkeypatch.setattr(device_socket, "EpicsSignalRO", FakeSignalRO)
-    monkeypatch.setattr(device_socket, "EpicsMotor", FakeMotor)
+    """``ClassicOphydAdapter.subscribe`` dispatches on these module globals."""
+    monkeypatch.setattr(classic_adapter, "EpicsSignal", FakeSignal)
+    monkeypatch.setattr(classic_adapter, "EpicsSignalRO", FakeSignalRO)
+    monkeypatch.setattr(classic_adapter, "EpicsMotor", FakeMotor)
+    monkeypatch.setattr(classic_adapter, "PseudoPositioner", FakePseudoPositioner)
     monkeypatch.setattr(device_socket, "PseudoPositioner", FakePseudoPositioner)
 
 
