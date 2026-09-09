@@ -47,6 +47,26 @@ def resolve_component(device: Device, component: str) -> Device:
     return target
 
 
+def primary_signal_name(device: Device) -> Optional[str]:
+    """The name of the one child signal that should drive ``device``'s headline value.
+
+    A `StandardReadable` built via ``add_children_as_readables(Format.HINTED_SIGNAL)``
+    (as `ophyd_async.epics.motor.Motor` does for ``user_readback``) names that
+    signal after the device itself, with no ``-suffix`` -- every other child
+    (limits, velocity, the ``.SET`` use/calibrate switch, ...) gets one. That
+    makes the hinted signal's bare name the one reliable way to tell "the
+    device's value" apart from its supporting signals.
+
+    Returns ``None`` when the device declares no single hint (a plain
+    ``Device`` with no ``StandardReadable`` hints, or more than one hinted
+    field) -- callers should then fall back to treating every readable child
+    as significant, since there is no basis to prefer one.
+    """
+    hints = getattr(device, "hints", None) or {}
+    fields = hints.get("fields") or []
+    return fields[0] if len(fields) == 1 else None
+
+
 class AsyncOphydAdapter(DeviceAdapter):
     """Adapter for ``ophyd_async.core.Device`` / ``Signal`` instances."""
 
@@ -102,20 +122,39 @@ class AsyncOphydAdapter(DeviceAdapter):
 
     async def _subscribe(self, callback: Callable[[dict], None]):
         subscriptions = []
-        for signal in walk_readable_signals(self.device):
-            read_access = True
-            write_access = isinstance(signal, (SignalW, SignalRW))
+        # When the device names one signal as its hint, only that signal's
+        # updates should set the device's headline "value" -- otherwise every
+        # child signal (limits, velocity, the motor record's ".SET"
+        # use/calibrate switch, ...) fires its own initial push, and whichever
+        # lands last in an arbitrary iteration order "wins" and sticks,
+        # permanently hiding the real readback (e.g. a settable motor
+        # displaying the literal string "Use", its calibrate-switch's value,
+        # because that child never changes again after the initial push).
+        primary_name = primary_signal_name(self.device)
+        # The device may be writable through a *different* child than the one
+        # driving "value" (e.g. a Motor's value comes from the read-only
+        # ``user_readback`` but is set via ``user_setpoint``), so compute this
+        # once for the whole device rather than per signal.
+        write_access = self.is_writable()
 
-            def signal_callback(reading, signal=signal):
+        for signal in walk_readable_signals(self.device):
+            is_value_signal = primary_name is None or signal.name == primary_name
+
+            def signal_callback(reading, signal=signal, is_value_signal=is_value_signal):
                 entry = reading.get(signal.name, {})
                 message = {
-                    "value": entry.get("value"),
                     "timestamp": entry.get("timestamp", time.time()),
                     "connected": True,
-                    "read_access": read_access,
-                    "write_access": write_access,
+                    "read_access": True,
                     "signal": signal.name,
                 }
+                if is_value_signal:
+                    message["value"] = entry.get("value")
+                    message["write_access"] = write_access
+                else:
+                    # Metadata only, like the classic adapter's non-readback
+                    # signals -- finch merges these without touching "value".
+                    message["sub_type"] = "meta"
                 callback(message)
 
             signal.subscribe(signal_callback)
