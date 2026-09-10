@@ -227,8 +227,14 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"error": f"Value must be a number. Could not set value of {device_name} to {value}"})
             return
 
-        timeout = data.get("timeout", 1)
-        if not isinstance(timeout, (int, float)):
+        # No default timeout: a real motor move (or any other genuinely slow
+        # set) can legitimately take much longer than a short fixed timeout,
+        # and each adapter already falls back to a sensible default of its
+        # own when none is given (e.g. ophyd-async's `Motor.set()` computes
+        # one from distance/velocity). A client that wants a hard deadline
+        # can still pass one explicitly.
+        timeout = data.get("timeout")
+        if timeout is not None and not isinstance(timeout, (int, float)):
             await websocket.send_json({"error": f"Timeout must be a number. Could not set value of {device_name} to {value}"})
             return
 

@@ -99,6 +99,12 @@ class ClassicOphydAdapter(DeviceAdapter):
             }
             callback(message)
 
+        def callback_setpoint(value, **kwargs):
+            callback({"setpoint": value, "sub_type": "meta"})
+
+        def callback_moving(value, **kwargs):
+            callback({"moving": bool(value), "sub_type": "meta"})
+
         def recursively_subscribe(dev):
             if isinstance(dev, (EpicsSignal, EpicsSignalRO)):
                 handles.append((dev, dev.subscribe(callback_md, event_type="meta")))
@@ -108,6 +114,20 @@ class ClassicOphydAdapter(DeviceAdapter):
                 for signal in dev.walk_signals():
                     handles.append(
                         (signal.item, signal.item.subscribe(callback_md, event_type="meta"))
+                    )
+                # Distinct fields, not "value" -- where the motor is headed,
+                # and whether it's actively moving there. Guarded with
+                # getattr: a test double standing in for EpicsMotor need not
+                # implement every component EpicsMotor happens to have.
+                setpoint = getattr(dev, "user_setpoint", None)
+                if setpoint is not None:
+                    handles.append(
+                        (setpoint, setpoint.subscribe(callback_setpoint, event_type="value"))
+                    )
+                is_moving = getattr(dev, "motor_is_moving", None)
+                if is_moving is not None:
+                    handles.append(
+                        (is_moving, is_moving.subscribe(callback_moving, event_type="value"))
                     )
             elif isinstance(dev, PseudoPositioner):
                 handles.append((dev, dev.subscribe(callback_value, event_type="readback")))

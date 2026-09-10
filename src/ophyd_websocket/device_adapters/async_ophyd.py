@@ -6,6 +6,7 @@ dispatched onto Bluesky's event loop via :func:`run_in_bluesky_loop`, since
 that is the loop the device was created and connected on (see
 ``async_runtime.py``).
 """
+import inspect
 import logging
 import time
 from typing import Any, Callable, Iterator, Optional
@@ -45,6 +46,28 @@ def resolve_component(device: Device, component: str) -> Device:
             raise AttributeError(f"Component '{component}' not found on device")
         target = getattr(target, part)
     return target
+
+
+def _display_metadata(datakey: dict) -> dict:
+    """Pull the fields the frontend already knows how to render out of a `describe()` DataKey.
+
+    Shaped to match the field names classic Ophyd's own "meta" event uses
+    (``units``, ``precision``, ``enum_strs``, ``lower_ctrl_limit``,
+    ``upper_ctrl_limit``) so the same frontend code path handles both --
+    see ``ClassicOphydAdapter.subscribe``'s ``callback_md``.
+    """
+    metadata: dict = {}
+    if "units" in datakey:
+        metadata["units"] = datakey["units"]
+    if "precision" in datakey:
+        metadata["precision"] = datakey["precision"]
+    if "choices" in datakey:
+        metadata["enum_strs"] = datakey["choices"]
+    control_limits = (datakey.get("limits") or {}).get("control")
+    if control_limits:
+        metadata["lower_ctrl_limit"] = control_limits.get("low")
+        metadata["upper_ctrl_limit"] = control_limits.get("high")
+    return metadata
 
 
 def primary_signal_name(device: Device) -> Optional[str]:
@@ -103,18 +126,33 @@ class AsyncOphydAdapter(DeviceAdapter):
             target = resolve_component(self.device, component)
 
         if not isinstance(target, SignalW):
-            writable = list(walk_writable_signals(target))
-            if len(writable) != 1:
-                raise TypeError(
-                    f"'{component or self.device.name}' does not resolve to a single "
-                    "writable signal; specify a component"
-                )
-            target = writable[0]
+            # A composite Device implementing the `Movable` protocol (e.g.
+            # `ophyd_async.epics.motor.Motor`, whose `set()` moves via
+            # `user_setpoint` with proper put-completion/timeout handling;
+            # or `EpicsSimDIO.set()`, which rejects a set on a hardware
+            # Input) knows its own semantically correct way to be set --
+            # prefer that over resolving to "the one writable child signal",
+            # which is wrong the moment a device has more than one (as any
+            # real Motor does: setpoint, velocity, limits, ...) and bypasses
+            # the device's own set() logic even when it has exactly one.
+            if not callable(getattr(target, "set", None)):
+                writable = list(walk_writable_signals(target))
+                if len(writable) != 1:
+                    raise TypeError(
+                        f"'{component or self.device.name}' does not resolve to a "
+                        "single writable signal and has no set() of its own; "
+                        "specify a component"
+                    )
+                target = writable[0]
 
-        kwargs = {} if timeout is None else {"timeout": timeout}
+        # Not every set() accepts `timeout` (EpicsSimDIO.set() doesn't), so
+        # only pass it through when the target's own signature takes it.
+        kwargs = {}
+        if timeout is not None and "timeout" in inspect.signature(target.set).parameters:
+            kwargs["timeout"] = timeout
         await run_in_bluesky_loop(self._set(target, value, kwargs))
 
-    async def _set(self, target: SignalW, value: Any, kwargs: dict) -> None:
+    async def _set(self, target: Any, value: Any, kwargs: dict) -> None:
         await target.set(value, **kwargs)
 
     async def subscribe(self, callback: Callable[[dict], None]) -> Any:
@@ -137,10 +175,22 @@ class AsyncOphydAdapter(DeviceAdapter):
         # once for the whole device rather than per signal.
         write_access = self.is_writable()
 
+        # ``ophyd_async.epics.motor.Motor`` (and anything built on it) names
+        # its target and in-motion flag consistently -- surface them as
+        # their own live fields (not the generic meta bucket) so the
+        # frontend can show "target" and a moving indicator for any motor,
+        # sim or real, without depending on the specific device subclass.
+        setpoint_signal = getattr(self.device, "user_setpoint", None)
+        done_move_signal = getattr(self.device, "motor_done_move", None)
+
         for signal in walk_readable_signals(self.device):
             is_value_signal = primary_name is None or signal.name == primary_name
 
-            def signal_callback(reading, signal=signal, is_value_signal=is_value_signal):
+            def signal_callback(
+                reading,
+                signal=signal,
+                is_value_signal=is_value_signal,
+            ):
                 entry = reading.get(signal.name, {})
                 message = {
                     "timestamp": entry.get("timestamp", time.time()),
@@ -151,6 +201,15 @@ class AsyncOphydAdapter(DeviceAdapter):
                 if is_value_signal:
                     message["value"] = entry.get("value")
                     message["write_access"] = write_access
+                elif signal is setpoint_signal:
+                    # A distinct field, not "value" -- this is where the
+                    # motor is headed, not where it currently is.
+                    message["setpoint"] = entry.get("value")
+                    message["sub_type"] = "meta"
+                elif signal is done_move_signal:
+                    # The motor record's DMOV is 1 when NOT moving.
+                    message["moving"] = entry.get("value") == 0
+                    message["sub_type"] = "meta"
                 else:
                     # Metadata only, like the classic adapter's non-readback
                     # signals -- finch merges these without touching "value".
@@ -159,6 +218,25 @@ class AsyncOphydAdapter(DeviceAdapter):
 
             signal.subscribe(signal_callback)
             subscriptions.append((signal, signal_callback))
+
+            if is_value_signal:
+                # Units/precision/limits/choices don't change like a value
+                # does, so send them once as a separate "meta" message (the
+                # same shape classic Ophyd's meta event uses) rather than
+                # repeating them on every value push.
+                datakey = (await signal.describe()).get(signal.name, {})
+                metadata = _display_metadata(datakey)
+                if metadata:
+                    callback(
+                        {
+                            **metadata,
+                            "sub_type": "meta",
+                            "connected": True,
+                            "read_access": True,
+                            "signal": signal.name,
+                            "timestamp": time.time(),
+                        }
+                    )
         return subscriptions
 
     async def unsubscribe(self, subscription: Any) -> None:
