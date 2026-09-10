@@ -17,6 +17,10 @@ export interface LiveSignal {
   enum_strs?: string[] | null
   min?: number | null
   max?: number | null
+  /** Where a settable device (e.g. a motor) is headed, if it differs from `value`. */
+  setpoint?: string | number | null
+  /** Whether the device is actively moving toward its setpoint. */
+  moving?: boolean | null
 }
 
 export interface SignalCardProps {
@@ -55,6 +59,12 @@ export default function SignalCard({
   const displayValue =
     enumStrings && typeof rawValue === 'number' ? (enumStrings[rawValue] ?? rawValue) : rawValue
 
+  const moving = signal?.moving ?? false
+  // Only worth a line of its own once it's actually a *target* -- i.e. the
+  // device has a setpoint and it differs from where it currently reads.
+  const hasSetpoint =
+    signal?.setpoint != null && signal.setpoint !== rawValue
+
   const submit = (value: string) => {
     if (value === '') return
     onSet(name, value)
@@ -69,6 +79,15 @@ export default function SignalCard({
           <p className="text-xs text-slate-400">updated {formatTimestamp(signal?.timestamp ?? 0)}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {moving && (
+            <span
+              title="moving"
+              className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium
+                uppercase tracking-wide text-amber-700 animate-pulse"
+            >
+              moving
+            </span>
+          )}
           <span
             title={connected ? 'connected' : 'disconnected'}
             className={`h-2.5 w-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-300'}`}
@@ -97,6 +116,12 @@ export default function SignalCard({
         </span>
         {signal?.units && <span className="shrink-0 text-sm text-slate-500">{signal.units}</span>}
       </p>
+
+      {hasSetpoint && (
+        <p className="mt-1 font-mono text-xs text-sky-600">
+          → {formatValue(signal?.setpoint, signal?.precision)} {signal?.units}
+        </p>
+      )}
 
       {/* EPICS reports 0/0 for "no limits configured"; don't render that. */}
       {signal?.min != null && signal?.max != null && signal.min !== signal.max && (
