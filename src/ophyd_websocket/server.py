@@ -1,3 +1,4 @@
+import asyncio
 import uvicorn
 import os
 import argparse
@@ -167,7 +168,10 @@ async def lifespan(app: FastAPI):
     
     if startup_dir:
         logger.info(f"[LIFESPAN] Setting startup directory in device registry: {startup_dir}")
-        device_registry.set_startup_dir(startup_dir, auto_load=True)
+        # Startup files are exec'd off the event loop: files that call
+        # asyncio.run() (e.g. bcsophyd's generated startup files) fail if a
+        # loop is already running in the current thread.
+        await asyncio.to_thread(device_registry.set_startup_dir, startup_dir, auto_load=True)
         loaded_devices = device_registry.list_devices()
         logger.info(f"[LIFESPAN] Auto-loaded devices from startup directory: {loaded_devices}")
         if loaded_devices:
