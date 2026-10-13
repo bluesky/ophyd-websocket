@@ -13,6 +13,7 @@ from ophyd_websocket.routers.pv_socket import router as pv_socket_router
 from ophyd_websocket.routers.camera_socket import router as camera_socket_router
 from ophyd_websocket.routers.camera_shared_socket import router as camera_shared_socket_router
 from ophyd_websocket.routers.tiff_socket import router as tiff_socket_router
+from ophyd_websocket.routers.h5_socket import router as h5_socket_router
 from ophyd_websocket.routers.qs_console_socket import router as qs_console_socket_router
 from ophyd_websocket.routers.core_api import router as core_api_router
 from ophyd_websocket.routers.device_socket import router as device_socket_router
@@ -255,6 +256,7 @@ app.include_router(pv_socket_router, prefix="/api/v1", tags=["PV WebSocket"])
 app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(camera_shared_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(tiff_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(h5_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router, prefix="/api/v1")
@@ -304,6 +306,20 @@ def list_websockets():
                     "toggle_log_example": {"toggleLogNormalization": True}
                 }
             },
+            "h5_socket": {
+                "endpoint": "/api/v1/h5-socket",
+                "description": "Streams the newest frame of a detector's HDF5 file, re-read whenever "
+                               "<prefix>:HDF1:FullFileName_RBV or NumCaptured_RBV changes. One shared "
+                               "decode per detector, however many clients subscribe",
+                "example_url": f"{BASE_WS_URL}/api/v1/h5-socket",
+                "format": "Binary JPEG images",
+                "example_messages": {
+                    "init_prefix_example": {"prefix": "SIMHDF1"},
+                    "init_pv_example": {"pv": "SIMHDF1:HDF1:FullFileName_RBV"},
+                    "init_full_example": {"prefix": "SIMHDF1", "plugin": "HDF1", "dataset": "/entry/data/data"},
+                    "toggle_log_example": {"toggleLogNormalization": True}
+                }
+            },
             "qs_console_socket": {
                 "endpoint": "/api/v1/qs-console-socket",
                 "description": "Queue server console output",
@@ -337,6 +353,7 @@ def read_root():
                 "camera_socket": f"{BASE_WS_URL}/api/v1/camera-socket",
                 "camera_socket_shared": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
                 "tiff_socket": f"{BASE_WS_URL}/api/v1/tiff-socket",
+                "h5_socket": f"{BASE_WS_URL}/api/v1/h5-socket",
                 "qs_console_socket": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },

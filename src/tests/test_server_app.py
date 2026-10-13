@@ -32,6 +32,7 @@ EXPECTED_WEBSOCKET_ROUTES = {
     "/api/v1/camera-socket",
     "/api/v1/camera-socket-shared",
     "/api/v1/tiff-socket",
+    "/api/v1/h5-socket",
     "/api/v1/qs-console-socket",
     "/api/v1/ws",
 }
@@ -66,6 +67,7 @@ def test_root_endpoint_lists_every_socket_and_rest_endpoint(client):
         "camera_socket",
         "camera_socket_shared",
         "tiff_socket",
+        "h5_socket",
         "qs_console_socket",
         "device_socket",
     }
@@ -82,6 +84,7 @@ def test_websockets_endpoint_documents_each_socket(client):
         "camera_socket",
         "camera_socket_shared",
         "tiff_socket",
+        "h5_socket",
         "qs_console_socket",
     }
     for name, info in sockets.items():

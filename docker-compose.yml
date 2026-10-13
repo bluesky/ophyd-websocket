@@ -2,6 +2,8 @@
 #
 #   caproto-ioc      -- simulated EPICS IOC serving SIM:* PVs
 #   caproto-detector -- simulated areaDetector serving SIMDET1:* PVs
+#   caproto-tiff-detector -- simulated TIFF writer serving SIMTIFF1:* PVs
+#   caproto-hdf5-detector -- simulated HDF5 writer serving SIMHDF1:* PVs
 #   ophyd-websocket  -- FastAPI/WebSocket server, loads ophyd devices from ./startup
 #   frontend         -- Vite dev server with a minimal SPA driven by finch hooks
 #
@@ -57,6 +59,23 @@ services:
     networks:
       - beamline
 
+  caproto-hdf5-detector:
+    build:
+      context: .
+      dockerfile: caproto/Dockerfile
+    container_name: caproto-hdf5-detector
+    environment:
+      SIM_IOC_SCRIPT: "caproto/sim_hdf5_detector_ioc.py"
+      SIM_PV_PREFIX: "SIMHDF1:"
+      # FullFileName_RBV must name a path that *ophyd-websocket* can open, so
+      # both containers share the h5data volume at the same /h5data path.
+      SIM_HDF5_OUTPUT_DIR: "/h5data"
+      SIM_HDF5_FRAMES_PER_FILE: "5"
+    volumes:
+      - h5data:/h5data
+    networks:
+      - beamline
+
   ophyd-websocket:
     build:
       context: .
@@ -66,6 +85,7 @@ services:
       - caproto-ioc
       - caproto-detector
       - caproto-tiff-detector
+      - caproto-hdf5-detector
     command: ["uv", "run", "python", "src/ophyd_websocket/server.py", "--startup-dir", "/startup"]
     environment:
       OAS_HOST: "0.0.0.0"
@@ -74,7 +94,7 @@ services:
       OAS_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
       OAS_REQUIRE_QSERVER: "false"
       # Unicast CA searches straight at the IOC containers (space separated).
-      EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector caproto-tiff-detector"
+      EPICS_CA_ADDR_LIST: "caproto-ioc caproto-detector caproto-tiff-detector caproto-hdf5-detector"
       EPICS_CA_AUTO_ADDR_LIST: "NO"
       EPICS_CA_MAX_ARRAY_BYTES: "10000000"
       SIM_PV_PREFIX: "SIM:"
@@ -84,6 +104,8 @@ services:
       - ./startup:/startup:ro
       # Sample TIFFs, at the same path the TIFF IOC writes into FullFileName_RBV.
       - ./caproto/assets:/assets:ro
+      # HDF5 files written by the HDF5 IOC, at the path it reports.
+      - h5data:/h5data:ro
     ports:
       - "8001:8001"
     networks:
@@ -111,6 +133,9 @@ services:
       - "5173:5173"
     networks:
       - beamline
+
+volumes:
+  h5data:
 
 networks:
   beamline:

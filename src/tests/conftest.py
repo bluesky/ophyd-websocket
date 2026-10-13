@@ -51,18 +51,20 @@ def event_loop():
 def _isolate_module_state():
     """Reset the module-level state the routers keep between requests.
 
-    ``core_api.pv_dict`` and the camera/TIFF shared-worker registries are
+    ``core_api.pv_dict`` and the camera/TIFF/HDF5 shared-worker registries are
     process globals; leaking them across tests makes ordering matter.
     """
-    from ophyd_websocket.routers import camera_shared_socket, core_api, tiff_socket
+    from ophyd_websocket.routers import camera_shared_socket, core_api, h5_socket, tiff_socket
 
     core_api.pv_dict.clear()
     camera_shared_socket._workers.clear()
     tiff_socket._workers.clear()
+    h5_socket._workers.clear()
     yield
     core_api.pv_dict.clear()
     camera_shared_socket._workers.clear()
     tiff_socket._workers.clear()
+    h5_socket._workers.clear()
 
 
 @pytest.fixture

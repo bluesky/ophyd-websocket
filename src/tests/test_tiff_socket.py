@@ -495,3 +495,34 @@ def test_tiff_socket_rejects_a_bad_init_message(client, path_signal):
     with client.websocket_connect("/api/v1/tiff-socket") as ws:
         ws.send_text("not json")
         assert "error" in ws.receive_json()
+
+
+# --------------------------------------------------------------------------
+# Choosing the detector: exact PV, plugin, finch message, query string
+# --------------------------------------------------------------------------
+
+def test_resolve_tiff_pv_prefers_an_exact_pv():
+    assert tiff_socket.resolve_tiff_pv({"pv": "BL:TIFF2:FullFileName_RBV", "prefix": "X"}) == "BL:TIFF2:FullFileName_RBV"
+
+
+def test_resolve_tiff_pv_honours_plugin():
+    assert tiff_socket.resolve_tiff_pv({"prefix": "BL:", "plugin": "TIFF2"}) == "BL:TIFF2:FullFileName_RBV"
+
+
+def test_resolve_tiff_pv_accepts_finch_image_array_pv():
+    assert tiff_socket.resolve_tiff_pv({"imageArray_PV": "SIMTIFF1:image1:ArrayData"}) == FILE_PATH_PV
+
+
+async def test_initialize_settings_query_params_override_the_message():
+    ws = FakeWebSocket(['{"imageArray_PV": "13SIM1:image1:ArrayData"}'])
+    ws.query_params = {"prefix": "SIMTIFF1"}
+
+    assert await tiff_socket.initialize_settings(ws) == FILE_PATH_PV
+
+
+def test_tiff_socket_detector_chosen_by_query_string(client, path_signal):
+    with client.websocket_connect("/api/v1/tiff-socket?pv=SIMTIFF1:TIFF1:FullFileName_RBV") as ws:
+        ws.send_json({"imageArray_PV": "13SIM1:image1:ArrayData"})
+        ws.receive_bytes()
+
+    assert FILE_PATH_PV in path_signal

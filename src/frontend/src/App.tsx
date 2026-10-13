@@ -2,16 +2,20 @@ import { useCallback, useState } from 'react'
 import { useOphydDeviceSocket, useOphydPVSocket } from '@blueskyproject/finch'
 import CameraPanel from './components/CameraPanel'
 import TIFFPanel from './components/TIFFPanel'
+import H5Panel from './components/H5Panel'
 import Sidebar from './components/Sidebar'
 import SignalCard from './components/SignalCard'
 import { ophydApiUrl } from './lib/config'
 import { useDeviceRegistry } from './lib/useDeviceRegistry'
 
-/** Prefix of the simulated areaDetector in caproto/sim_detector_ioc.py. */
+/** Default prefix: the simulated areaDetector in caproto/sim_detector_ioc.py. */
 const DETECTOR_PREFIX = 'SIMDET1'
 
-/** Prefix of the simulated TIFF-writer in caproto/sim_tiff_detector_ioc.py. */
+/** Default prefix: the simulated TIFF-writer in caproto/sim_tiff_detector_ioc.py. */
 const TIFF_DETECTOR_PREFIX = 'SIMTIFF1'
+
+/** Default prefix: the simulated HDF5-writer in caproto/sim_hdf5_detector_ioc.py. */
+const HDF5_DETECTOR_PREFIX = 'SIMHDF1'
 
 /** A few PVs from caproto/sim_ioc.py, offered as a one-click starting point. */
 const SUGGESTED_PVS = [
@@ -75,14 +79,21 @@ export default function App() {
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
               Camera — /camera-socket
             </h2>
-            <CameraPanel prefix={DETECTOR_PREFIX} />
+            <CameraPanel defaultPrefix={DETECTOR_PREFIX} />
           </section>
 
           <section>
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
               TIFF — /tiff-socket
             </h2>
-            <TIFFPanel prefix={TIFF_DETECTOR_PREFIX} />
+            <TIFFPanel defaultPrefix={TIFF_DETECTOR_PREFIX} />
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+              HDF5 — /h5-socket
+            </h2>
+            <H5Panel defaultPrefix={HDF5_DETECTOR_PREFIX} />
           </section>
 
           <section>

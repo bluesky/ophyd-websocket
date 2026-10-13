@@ -431,6 +431,23 @@ sequenceDiagram
 # Experimental Features
 In addition to subscribing to devices and setting their values, there are some additional experimental websockets and REST API endpoints available in this project.
 
+## Streaming saved detector images: tiff-socket and h5-socket
+`/api/v1/tiff-socket` and `/api/v1/h5-socket` stream the newest image an areaDetector file plugin has written to disk, as binary JPEG frames. Each detector gets one shared worker. A new file or frame is decoded once and the result is cached, however many clients are subscribed.
+
+Your first message to `/api/v1/h5-socket` picks the detector:
+```
+{"prefix": "13PIL1"}                                   # watches 13PIL1:HDF1:FullFileName_RBV + NumCaptured_RBV
+{"prefix": "13PIL1", "plugin": "HDF2"}                 # non-default plugin name
+{"pv": "13PIL1:HDF1:FullFileName_RBV"}                 # exact PV; shares a worker with the prefix form
+{"prefix": "13PIL1", "dataset": "/entry/instrument/detector/data"}   # optional dataset override
+```
+- The socket re-reads the file whenever `FullFileName_RBV` changes (a new file) or `NumCaptured_RBV` changes (a frame appended to the same file in Capture or Stream mode). It sends the last frame along the first axis of the dataset.
+- The default dataset is `/entry/data/data`. If that path doesn't exist, the largest dataset with 2 or more dimensions is used.
+- Files that are still being written are opened with SWMR when the detector writes with `SWMRMode` on. Otherwise the socket falls back to a plain read with HDF5 file locking disabled. That fallback only sees frames after the detector flushes them.
+- Send `{"toggleLogNormalization": false}` at any time to switch between log and linear scaling.
+
+To try it without hardware, run `python caproto/sim_hdf5_detector_ioc.py --list-pvs`. It writes rolling HDF5 files to `caproto/h5_out/`. Use `--frames-per-file 1` for Single mode and `--no-swmr` to test the fallback read.
+
 ## "Ophyd as a Service" REST API
 After starting the server navigate to [http://localhost:8001/docs](http://localhost:8001/docs) to see endpoints and try out functionality. 
 
