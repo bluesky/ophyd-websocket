@@ -1,12 +1,19 @@
 import { CameraCanvas, useOphydPVSocket } from '@blueskyproject/finch'
 import SignalCard from './SignalCard'
 import StreamSettingsForm, { type StreamField } from './StreamSettingsForm'
-import { stripColon, useStreamSettings } from '../lib/streamSettings'
+import { streamWsUrl, stripColon, useStreamSettings } from '../lib/streamSettings'
 
-export interface CameraPanelProps {
-  /** Default detector PV prefix without the trailing colon, e.g. `SIMDET1`. */
-  defaultPrefix: string
-}
+export type CameraPanelProps =
+  | {
+      /** Default detector PV prefix without the trailing colon, e.g. `SIMDET1`. */
+      defaultPrefix: string
+      device?: undefined
+    }
+  | {
+      /** Name of a camera in the device registry, e.g. a BCS `ccd_camera`. */
+      device: string
+      defaultPrefix?: undefined
+    }
 
 const FIELDS: StreamField[] = [
   { name: 'prefix', label: 'Detector prefix', placeholder: '13SIM1', hint: 'Uses <prefix>:cam1:* for frame geometry' },
@@ -19,6 +26,31 @@ const FIELDS: StreamField[] = [
 ]
 
 /**
+ * Live image stream, from an areaDetector's PVs or from a registry camera.
+ */
+export default function CameraPanel(props: CameraPanelProps) {
+  return props.device !== undefined ? (
+    <RegistryCamera device={props.device} />
+  ) : (
+    <AreaDetectorCamera defaultPrefix={props.defaultPrefix} />
+  )
+}
+
+/**
+ * A registry camera over `/camera-socket-shared?device=<name>`. The server
+ * polls the camera at its own fixed rate and shares the frames with every
+ * viewer, and finch's opening PV message is ignored there.
+ */
+function RegistryCamera({ device }: { device: string }) {
+  return (
+    <div>
+      <p className="mb-2 font-mono text-sm text-slate-600">{device}</p>
+      <CameraCanvas wsUrl={streamWsUrl('camera-socket-shared', { device })} canvasSize="medium" />
+    </div>
+  )
+}
+
+/**
  * Live image stream from an areaDetector.
  *
  * `CameraCanvas` opens its own `/camera-socket` connection and negotiates the
@@ -26,7 +58,7 @@ const FIELDS: StreamField[] = [
  * so all it needs is the prefix (plus, optionally, the image array PV). The
  * cards beside it drive the detector over the ordinary PV socket.
  */
-export default function CameraPanel({ defaultPrefix }: CameraPanelProps) {
+function AreaDetectorCamera({ defaultPrefix }: { defaultPrefix: string }) {
   const { settings, generation, apply, reset } = useStreamSettings('camera', {
     prefix: defaultPrefix,
     imageArrayPV: '',

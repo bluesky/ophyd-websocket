@@ -1,15 +1,21 @@
 import asyncio
 import contextlib
+import inspect
 import io
 import json
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from PIL import Image
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ophyd import EpicsSignalRO
+from ophyd_async.core import SignalR
+
+from ophyd_websocket.async_runtime import run_in_bluesky_loop
+from ophyd_websocket.device_registry import device_registry, is_camera_device
 
 from .camera_socket import initialize_settings, update_enum_lists
 
@@ -44,6 +50,38 @@ dataTypeEnumList = [
 ]
 max_dimension = 5000
 JPEG_QUALITY = 75
+
+# Registry cameras (``?device=<name>``) have no push: each frame is one
+# request to the camera's server. For a BCS camera that server handles every
+# client one request at a time, the beamline's queueserver included, so the
+# rate stays low by default and is set on the server only, never by a client.
+DEFAULT_POLL_FPS = 2.0
+MAX_POLL_FPS = 10.0
+MAX_BACKOFF_S = 5.0
+
+
+def _poll_fps_from_env() -> float:
+    raw = os.getenv("OAS_CAMERA_POLL_FPS", "")
+    if not raw:
+        return DEFAULT_POLL_FPS
+    try:
+        fps = float(raw)
+    except ValueError:
+        logger.warning("OAS_CAMERA_POLL_FPS=%r is not a number; using %s", raw, DEFAULT_POLL_FPS)
+        return DEFAULT_POLL_FPS
+    if not fps > 0:
+        logger.warning("OAS_CAMERA_POLL_FPS=%r must be above 0; using %s", raw, DEFAULT_POLL_FPS)
+        return DEFAULT_POLL_FPS
+    if fps > MAX_POLL_FPS:
+        logger.warning("OAS_CAMERA_POLL_FPS=%r is above the cap; using %s", raw, MAX_POLL_FPS)
+        return MAX_POLL_FPS
+    return fps
+
+
+POLL_FPS = _poll_fps_from_env()
+
+# PIL image mode -> the colorMode name the EPICS path already sends.
+_PIL_COLOR_MODES = {"L": "Mono", "RGB": "RGB1"}
 
 
 router = APIRouter()
@@ -131,6 +169,8 @@ def build_jpeg_buffer(
 
 @dataclass
 class SharedCameraWorker:
+    supports_log_normalization: ClassVar[bool] = True
+
     worker_key: tuple[Any, ...]
     image_array_pv: str
     settings_list: list[dict[str, str]]
@@ -275,6 +315,173 @@ class SharedCameraWorker:
             self.condition.notify_all()
 
 
+def _array_dtype_name(array: np.ndarray) -> str:
+    for name, dtype in dtype_map.items():
+        if array.dtype == dtype:
+            return name
+    return "Float64"
+
+
+@dataclass
+class RegistryCameraWorker:
+    """Polls one registry device for frames and shares them with every client.
+
+    One worker, and so one poll loop, per device however many clients
+    watch it; frames go out latest-wins through the same versioned
+    condition the EPICS worker uses, so a slow client never causes an extra
+    request. A device with an async ``get_jpeg()`` has its JPEG bytes
+    forwarded untouched; an ophyd-async ``SignalR`` of numpy arrays is read
+    and encoded with ``build_jpeg_buffer``. Subscriptions are never used:
+    their fixed fast polling would load a shared camera server.
+    """
+
+    worker_key: tuple[Any, ...]
+    device_name: str
+    device: Any
+    sockets: set[WebSocket] = field(default_factory=set)
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    latest_settings: dict[str, Any] | None = None
+    settings_version: int = 0
+    latest_frame: bytes | None = None
+    frame_version: int = 0
+    use_log_normalization: bool = True
+    poll_task: asyncio.Task | None = None
+    _passes_jpeg_through: bool = True
+    _failing: bool = False
+
+    @property
+    def supports_log_normalization(self) -> bool:
+        # Normalization happens while encoding; forwarded JPEGs aren't encoded here.
+        return not self._passes_jpeg_through
+
+    async def start(self) -> tuple[bool, str | None]:
+        if inspect.iscoroutinefunction(getattr(self.device, "get_jpeg", None)):
+            self._passes_jpeg_through = True
+        elif isinstance(self.device, SignalR) and is_camera_device(self.device):
+            self._passes_jpeg_through = False
+        else:
+            return False, (
+                f"Device '{self.device_name}' is not a camera: it needs an async "
+                "get_jpeg() or to be an ophyd-async SignalR of numpy arrays"
+            )
+        self.poll_task = asyncio.create_task(self._poll_loop())
+        return True, None
+
+    async def stop(self):
+        if self.poll_task is not None:
+            self.poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.poll_task
+            self.poll_task = None
+
+        async with self.condition:
+            self.condition.notify_all()
+
+    async def _poll_loop(self):
+        loop = asyncio.get_running_loop()
+        interval = 1.0 / POLL_FPS
+        backoff = interval
+        while True:
+            started = loop.time()
+            try:
+                if self._passes_jpeg_through:
+                    frame, settings = await self._fetch_jpeg()
+                else:
+                    frame, settings = await self._fetch_and_encode_array()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not self._failing:
+                    self._failing = True
+                    logger.warning(
+                        "Camera '%s': frame request failed (%s); retrying with backoff "
+                        "up to %ss, further failures logged at debug level",
+                        self.device_name, error, MAX_BACKOFF_S,
+                    )
+                else:
+                    logger.debug("Camera '%s': frame request failed again", self.device_name, exc_info=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
+                continue
+
+            if self._failing:
+                self._failing = False
+                logger.info("Camera '%s': frame requests are succeeding again", self.device_name)
+            backoff = interval
+            await self._publish(frame, settings)
+            await asyncio.sleep(max(0.0, interval - (loop.time() - started)))
+
+    async def _fetch_jpeg(self) -> tuple[bytes, dict[str, Any]]:
+        jpeg = await self.device.get_jpeg()
+        # Image.open reads only the header; no pixel decode happens here.
+        with Image.open(io.BytesIO(jpeg)) as image:
+            width, height = image.size
+            mode = image.mode
+        settings = {
+            "x": width,
+            "y": height,
+            "colorMode": _PIL_COLOR_MODES.get(mode, "RGB1"),
+            "dataType": "UInt8",
+        }
+        return jpeg, settings
+
+    async def _fetch_and_encode_array(self) -> tuple[bytes, dict[str, Any]]:
+        array = np.asarray(await run_in_bluesky_loop(self.device.get_value()))
+        if array.ndim == 2:
+            color_mode = "Mono"
+        elif array.ndim == 3 and array.shape[2] == 3:
+            color_mode = "RGB1"
+        else:
+            raise ValueError(f"expected a (H, W) or (H, W, 3) image, got shape {array.shape}")
+        height, width = array.shape[:2]
+        data_type = _array_dtype_name(array)
+        result = await asyncio.to_thread(
+            build_jpeg_buffer,
+            array.ravel(),
+            height,
+            width,
+            color_mode,
+            data_type,
+            self.use_log_normalization,
+        )
+        if isinstance(result, Exception):
+            raise result
+        settings = {"x": width, "y": height, "colorMode": color_mode, "dataType": data_type}
+        return result, settings
+
+    async def _publish(self, frame: bytes, settings: dict[str, Any]):
+        # The server repeats its newest frame when polled faster than the
+        # camera updates; don't send clients the same picture again.
+        if frame == self.latest_frame and settings == self.latest_settings:
+            return
+        if settings != self.latest_settings:
+            self.latest_settings = settings
+            self.settings_version += 1
+        self.latest_frame = frame
+        self.frame_version += 1
+        async with self.condition:
+            self.condition.notify_all()
+
+
+async def get_or_create_registry_worker(device_name: str):
+    key = ("device", device_name)
+    async with _workers_lock:
+        worker = _workers.get(key)
+        if worker is not None:
+            return worker, None
+
+        device = device_registry.get_device(device_name)
+        if device is None:
+            return None, f"Device '{device_name}' not found in device registry"
+
+        worker = RegistryCameraWorker(worker_key=key, device_name=device_name, device=device)
+        ok, error = await worker.start()
+        if not ok:
+            return None, error
+        _workers[key] = worker
+        return worker, None
+
+
 def make_worker_key(image_array_pv: str, settings_list: list[dict[str, str]]) -> tuple[Any, ...]:
     normalized_settings = tuple((item["name"], item["pv"]) for item in settings_list)
     return (image_array_pv, normalized_settings)
@@ -300,7 +507,7 @@ async def get_or_create_worker(image_array_pv: str, settings_list: list[dict[str
         return worker, None
 
 
-async def cleanup_worker_if_unused(worker: SharedCameraWorker):
+async def cleanup_worker_if_unused(worker: SharedCameraWorker | RegistryCameraWorker):
     async with _workers_lock:
         if worker.sockets:
             return
@@ -312,14 +519,24 @@ async def cleanup_worker_if_unused(worker: SharedCameraWorker):
 
 
 @router.websocket("/camera-socket-shared")
-async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
+async def websocket_endpoint(websocket: WebSocket, num: int | None = None, device: str | None = None):
+    """Stream JPEG frames shared between every client of one camera.
+
+    With ``?device=<name>`` the frames come from that registry device (see
+    ``RegistryCameraWorker``); any opening JSON message is ignored.
+    Otherwise the first message names the areaDetector PVs, as for
+    ``/camera-socket``.
+    """
     await websocket.accept()
 
-    settings_list, image_array_pv = await initialize_settings(websocket)
-    if settings_list is None or image_array_pv is None:
-        return
+    if device:
+        worker, error = await get_or_create_registry_worker(device)
+    else:
+        settings_list, image_array_pv = await initialize_settings(websocket)
+        if settings_list is None or image_array_pv is None:
+            return
+        worker, error = await get_or_create_worker(image_array_pv, settings_list)
 
-    worker, error = await get_or_create_worker(image_array_pv, settings_list)
     if worker is None:
         await websocket.send_text(json.dumps({"error": str(error)}))
         await websocket.close()
@@ -357,7 +574,7 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
-            if "toggleLogNormalization" in data:
+            if "toggleLogNormalization" in data and worker.supports_log_normalization:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 await websocket.send_text(json.dumps({"logNormalization": worker.use_log_normalization}))
 
@@ -385,6 +602,10 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         pass
     finally:
         worker.sockets.discard(websocket)
+        # Shielded and ahead of close(): if this handler is being cancelled,
+        # every further await raises, and a worker left behind would keep
+        # polling (for a registry camera, a server shared with experiments).
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(cleanup_worker_if_unused(worker))
         with contextlib.suppress(Exception):
             await websocket.close()
-        await cleanup_worker_if_unused(worker)

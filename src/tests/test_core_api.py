@@ -5,7 +5,7 @@ import pytest
 
 from ophyd_websocket.routers import core_api
 
-from .fakes import FakeCompositeDevice, FakeSignal
+from .fakes import FakeCompositeDevice, FakeJpegCamera, FakeSignal
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +84,18 @@ def test_list_devices_returns_registered_names(client, fake_registry):
     body = client.get("/api/v1/devices").json()
 
     assert sorted(body["devices"]) == ["m1", "m2"]
+    assert body["cameras"] == []
     assert body["count"] == 2
+
+
+def test_list_devices_names_the_cameras(client, fake_registry):
+    fake_registry.add_device("m1", FakeSignal("IOC:m1", name="m1"))
+    fake_registry.add_device("ccd_camera", FakeJpegCamera(name="ccd_camera"))
+
+    body = client.get("/api/v1/devices").json()
+
+    assert sorted(body["devices"]) == ["ccd_camera", "m1"]
+    assert body["cameras"] == ["ccd_camera"]
 
 
 def test_get_device_info_returns_details(client, fake_registry):

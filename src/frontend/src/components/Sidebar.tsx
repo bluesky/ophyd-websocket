@@ -2,13 +2,17 @@ import { useState } from 'react'
 import { ophydApiUrl } from '../lib/config'
 
 export interface SidebarProps {
+  /** Registry devices that are not cameras. */
   registryDevices: string[]
+  registryCameras: string[]
   registryError: string | null
   registryLoading: boolean
   onRefreshRegistry: () => void
   subscribedDevices: string[]
   onToggleDevice: (name: string) => void
   onSubscribeAllDevices: () => void
+  selectedCameras: string[]
+  onToggleCamera: (name: string) => void
   subscribedPvs: string[]
   onAddPv: (pv: string) => void
 }
@@ -16,12 +20,15 @@ export interface SidebarProps {
 /** Registry browser plus the arbitrary-PV subscription form. */
 export default function Sidebar({
   registryDevices,
+  registryCameras,
   registryError,
   registryLoading,
   onRefreshRegistry,
   subscribedDevices,
   onToggleDevice,
   onSubscribeAllDevices,
+  selectedCameras,
+  onToggleCamera,
   subscribedPvs,
   onAddPv,
 }: SidebarProps) {
@@ -51,7 +58,7 @@ export default function Sidebar({
           </p>
         )}
 
-        {!registryLoading && !registryError && registryDevices.length === 0 && (
+        {!registryLoading && !registryError && registryDevices.length === 0 && registryCameras.length === 0 && (
           <p className="mt-2 text-sm text-slate-400">
             Registry is empty. Start the server with <span className="font-mono">--startup-dir</span>.
           </p>
@@ -91,6 +98,37 @@ export default function Sidebar({
           </>
         )}
       </section>
+
+      {registryCameras.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Cameras</h2>
+          <p className="mt-1 text-xs text-slate-400">
+            Streamed via <span className="font-mono">/camera-socket-shared</span>, not subscribed.
+          </p>
+          <ul className="mt-2 space-y-1">
+            {registryCameras.map((name) => {
+              const active = selectedCameras.includes(name)
+              return (
+                <li key={name}>
+                  <button
+                    type="button"
+                    onClick={() => onToggleCamera(name)}
+                    className={`w-full truncate rounded px-2 py-1 text-left font-mono text-sm transition
+                      ${
+                        active
+                          ? 'bg-sky-100 text-sky-800'
+                          : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                  >
+                    {active ? '● ' : '○ '}
+                    {name}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
 
       <section>
         <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">

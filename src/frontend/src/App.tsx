@@ -31,6 +31,7 @@ export default function App() {
   const registry = useDeviceRegistry()
   const [subscribedDevices, setSubscribedDevices] = useState<string[]>([])
   const [subscribedPvs, setSubscribedPvs] = useState<string[]>([])
+  const [selectedCameras, setSelectedCameras] = useState<string[]>([])
 
   const {
     devices: deviceStates,
@@ -42,6 +43,12 @@ export default function App() {
 
   const toggleDevice = useCallback((name: string) => {
     setSubscribedDevices((current) =>
+      current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name],
+    )
+  }, [])
+
+  const toggleCamera = useCallback((name: string) => {
+    setSelectedCameras((current) =>
       current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name],
     )
   }, [])
@@ -58,12 +65,15 @@ export default function App() {
     <div className="flex h-full bg-slate-50 text-slate-900">
       <Sidebar
         registryDevices={registry.devices}
+        registryCameras={registry.cameras}
         registryError={registry.error}
         registryLoading={registry.loading}
         onRefreshRegistry={() => void registry.refresh()}
         subscribedDevices={subscribedDevices}
         onToggleDevice={toggleDevice}
         onSubscribeAllDevices={() => setSubscribedDevices(registry.devices)}
+        selectedCameras={selectedCameras}
+        onToggleCamera={toggleCamera}
         subscribedPvs={subscribedPvs}
         onAddPv={addPv}
       />
@@ -81,6 +91,19 @@ export default function App() {
             </h2>
             <CameraPanel defaultPrefix={DETECTOR_PREFIX} />
           </section>
+
+          {selectedCameras.length > 0 && (
+            <section>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+                Registry cameras — /camera-socket-shared
+              </h2>
+              <div className="flex flex-wrap items-start gap-6">
+                {selectedCameras.map((name) => (
+                  <CameraPanel key={name} device={name} />
+                ))}
+              </div>
+            </section>
+          )}
 
           <section>
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">

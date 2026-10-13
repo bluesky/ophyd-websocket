@@ -140,3 +140,24 @@ def test_two_clients_subscribe_independently(client, fake_registry, async_device
         _set_on_bluesky_loop(async_device.count, 9.0)
         update1_again = ws1.receive_json()
         assert update1_again["value"] == 9.0
+
+
+def test_subscribe_to_camera_is_refused_without_polling(client, fake_registry):
+    from .fakes import FakeJpegCamera
+
+    camera = FakeJpegCamera(name="ccd_camera")
+    fake_registry.add_device("ccd_camera", camera)
+
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "device": "ccd_camera"})
+        summary = ws.receive_json()
+
+    assert summary["action"] == "subscribe"
+    assert summary["subscribed"] == []
+    assert summary["failed"] == [
+        {
+            "device": "ccd_camera",
+            "error": "is a camera; stream it from /camera-socket-shared?device=ccd_camera",
+        }
+    ]
+    assert camera.calls == 0

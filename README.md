@@ -465,6 +465,7 @@ The server can be configured using environment variables or command line argumen
 | Require Queue Server | `OAS_REQUIRE_QSERVER` | `false` | Whether queue server safety checks are enforced |
 | Allowed Origins | `OAS_ALLOWED_ORIGINS` | None | Additional CORS origins (comma-separated) |
 | Host | `OAS_LOG_LEVEL` | `INFO` | Log level |
+| Camera Poll Rate | `OAS_CAMERA_POLL_FPS` | `2` | Frames per second requested from each registry camera on `/camera-socket-shared?device=<name>`, shared by all its clients (max `10`) |
 
 #### Queue Server Configuration
 The REST API endpoints for setting values of devices can optionally first check if the Queue Server is active and reject requests if a plan is running. This feature is currently only available on the REST endpoints, not the websockets, but is planned to be added to websockets.

@@ -1,14 +1,16 @@
 """
 Device Registry for managing Ophyd devices across the application and Queue Server safety checks
 """
+import inspect
 import os
 import sys
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, TypeAlias, Union
+import numpy as np
 from ophyd import Device as ClassicDevice
 from ophyd.signal import EpicsSignalBase
-from ophyd_async.core import Device as AsyncDevice
+from ophyd_async.core import Device as AsyncDevice, SignalR
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,20 @@ SupportedDevice: TypeAlias = Union[ClassicDevice, EpicsSignalBase, AsyncDevice]
 def is_supported_device(obj: Any) -> bool:
     """Whether ``obj`` is a device/signal instance the registry can hold."""
     return isinstance(obj, (ClassicDevice, EpicsSignalBase, AsyncDevice))
+
+
+def is_camera_device(obj: Any) -> bool:
+    """Whether ``obj`` produces image frames and so must be streamed, not subscribed.
+
+    Duck-typed so no camera package is imported here: anything with an async
+    ``get_jpeg()`` (e.g. ``bcsophyd.zmq.BCSVideoCamera``) counts, as does an
+    ophyd-async ``SignalR`` whose value is a numpy array. These are served by
+    ``/camera-socket-shared?device=<name>``; ``/device-socket`` refuses them,
+    since subscribing would poll and decode every frame.
+    """
+    if inspect.iscoroutinefunction(getattr(obj, "get_jpeg", None)):
+        return True
+    return isinstance(obj, SignalR) and getattr(obj, "datatype", None) is np.ndarray
 
 
 class DeviceRegistry:
@@ -113,6 +129,10 @@ class DeviceRegistry:
     def list_devices(self) -> List[str]:
         """Get list of all device names"""
         return list(self._devices.keys())
+
+    def list_cameras(self) -> List[str]:
+        """Names of the registered devices that are cameras (see ``is_camera_device``)"""
+        return [name for name, device in self._devices.items() if is_camera_device(device)]
     
     def get_device_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a device"""
@@ -127,6 +147,7 @@ class DeviceRegistry:
             "type": type(device).__name__,
             "class": f"{type(device).__module__}.{type(device).__name__}",
             "is_async": is_async,
+            "kind": "camera" if is_camera_device(device) else "device",
         }
 
         # Add device-specific information
@@ -140,7 +161,7 @@ class DeviceRegistry:
         # synchronous info lookup can't await them, so it reports the type
         # only for async devices. Use the REST/WebSocket adapter paths for
         # live async values.
-        if not is_async:
+        if not is_async and info["kind"] != "camera":
             if hasattr(device, 'describe'):
                 try:
                     info["description"] = device.describe()

@@ -6,7 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ophyd_websocket.device_adapters import adapt_device
 from ophyd_websocket.device_adapters.classic import PseudoPositioner
-from ophyd_websocket.device_registry import device_registry
+from ophyd_websocket.device_registry import device_registry, is_camera_device
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         already = []
         not_found = []
+        refused = []
         worklist = []  # list of (name, device, adapter)
 
         for name in names:
@@ -104,6 +105,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"Available devices: {available}"
                 )
                 not_found.append({"device": name, "error": "not found in device registry"})
+                continue
+            if is_camera_device(device):
+                # Subscribing would describe() (a whole frame) and then poll and
+                # decode frames, and the arrays can't go out as JSON anyway.
+                logger.info(f"subscribe request for camera '{name}' refused")
+                refused.append({
+                    "device": name,
+                    "error": f"is a camera; stream it from /camera-socket-shared?device={name}",
+                })
                 continue
             worklist.append((name, device, adapt_device(device)))
 
@@ -136,7 +146,7 @@ async def websocket_endpoint(websocket: WebSocket):
         else:
             failures = []
 
-        all_failed = not_found + failures
+        all_failed = not_found + refused + failures
 
         summary = {
             "action": "subscribe",

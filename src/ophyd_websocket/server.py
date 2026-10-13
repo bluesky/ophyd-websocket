@@ -291,8 +291,12 @@ def list_websockets():
             },
             "camera_socket_shared": {
                 "endpoint": "/api/v1/camera-socket-shared",
-                "description": "Live image streaming with shared decode/compress workers keyed by camera args",
+                "description": "Live image streaming with shared decode/compress workers keyed by camera args. "
+                               "With ?device=<name>, streams a registry camera (a device with an async "
+                               "get_jpeg(), or an ophyd-async SignalR of numpy arrays) polled at "
+                               "OAS_CAMERA_POLL_FPS (default 2, max 10), one poll shared by every client",
                 "example_url": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
+                "example_device_url": f"{BASE_WS_URL}/api/v1/camera-socket-shared?device=ccd_camera",
                 "format": "Binary JPEG images"
             },
             "tiff_socket": {

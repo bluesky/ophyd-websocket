@@ -93,18 +93,22 @@ def list_devices():
     List all devices in the device registry
     
     Returns a list of device names that have been loaded from startup files
-    or manually added to the registry.
+    or manually added to the registry. ``cameras`` names the subset that are
+    image sources: stream those from ``/camera-socket-shared?device=<name>``
+    rather than subscribing to them on ``/device-socket``.
     """
     devices = device_registry.list_devices()
     if devices:
         return {
             "devices": devices,
+            "cameras": device_registry.list_cameras(),
             "count": len(devices),
             "message": f"Found {len(devices)} devices in registry"
         }
     else:
         return {
             "devices": [],
+            "cameras": [],
             "count": 0,
             "message": "No devices found in registry. Use --startup-dir to load devices from Python files."
         }

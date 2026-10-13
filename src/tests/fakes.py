@@ -6,7 +6,13 @@ The routers reach for ``EpicsSignal`` / ``EpicsSignalRO`` / ``EpicsMotor`` /
 names with the classes below lets the socket handlers run end to end without a
 Channel Access connection (and therefore without an IOC in CI).
 """
+import io
+
 import numpy as np
+from ophyd_async.core import SignalR, SoftSignalBackend
+from PIL import Image
+
+from ophyd_websocket.device_registry import is_camera_device
 
 
 class FakeStatus:
@@ -213,6 +219,9 @@ class FakeRegistry:
     def list_devices(self):
         return list(self._devices)
 
+    def list_cameras(self):
+        return [name for name, device in self._devices.items() if is_camera_device(device)]
+
     def get_device_info(self, name):
         device = self._devices.get(name)
         if device is None:
@@ -243,3 +252,36 @@ def gradient_image(height=8, width=8, channels=None, dtype=np.uint16):
     shape = (height, width) if channels is None else (height, width, channels)
     count = int(np.prod(shape))
     return np.arange(count, dtype=dtype).reshape(shape)
+
+
+def make_jpeg(width=16, height=8, mode="RGB", color=(200, 30, 30)):
+    """A small JPEG made with PIL, as a camera server would send it."""
+    if mode == "L":
+        color = color[0] if isinstance(color, tuple) else color
+    buffered = io.BytesIO()
+    Image.new(mode, (width, height), color).save(buffered, format="JPEG")
+    return buffered.getvalue()
+
+
+class FakeJpegCamera(SignalR[np.ndarray]):
+    """An ophyd-async image signal with ``get_jpeg()``, like ``bcsophyd``'s BCSVideoCamera.
+
+    ``get_jpeg()`` returns ``frame`` and counts its calls; ``fail_for(n)``
+    makes the next ``n`` calls raise, as an unreachable camera server would.
+    """
+
+    def __init__(self, name="cam", frame=None):
+        super().__init__(SoftSignalBackend(np.ndarray), name=name)
+        self.frame = frame if frame is not None else make_jpeg()
+        self.calls = 0
+        self._failures_left = 0
+
+    def fail_for(self, count):
+        self._failures_left = count
+
+    async def get_jpeg(self):
+        self.calls += 1
+        if self._failures_left > 0:
+            self._failures_left -= 1
+            raise ConnectionError("camera server unreachable")
+        return self.frame
