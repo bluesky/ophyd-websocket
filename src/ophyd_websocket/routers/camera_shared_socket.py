@@ -11,6 +11,8 @@ from PIL import Image
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ophyd import EpicsSignalRO
 
+from ophyd_websocket.auth import authenticate_websocket, is_auth_message
+
 from .camera_socket import initialize_settings, update_enum_lists
 
 logger = logging.getLogger(__name__)
@@ -315,7 +317,13 @@ async def cleanup_worker_if_unused(worker: SharedCameraWorker):
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
-    settings_list, image_array_pv = await initialize_settings(websocket)
+    # Before any worker exists: an unauthenticated client must not start
+    # polling a camera or open CA channels.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
+    settings_list, image_array_pv = await initialize_settings(websocket, session)
     if settings_list is None or image_array_pv is None:
         return
 
@@ -357,6 +365,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
+            if is_auth_message(data):
+                await session.handle_auth_message(websocket, data)
+                continue
             if "toggleLogNormalization" in data:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 await websocket.send_text(json.dumps({"logNormalization": worker.use_log_normalization}))
@@ -365,10 +376,11 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     receiver_task = asyncio.create_task(receiver_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {sender_task, receiver_task},
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        async with session.guard(websocket):
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
         for task in done:
             exc = task.exception()
             if exc is None:

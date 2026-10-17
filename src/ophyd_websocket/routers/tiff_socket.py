@@ -15,6 +15,8 @@ from ophyd import EpicsSignalRO
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 #from fastapi.testclient import TestClient
 
+from ..auth import authenticate_websocket, is_auth_message, receive_non_auth_text
+
 logger = logging.getLogger(__name__)
 
 max_dimension = 2500 #maximum pixel width or height to be sent out. Increase if higher fidelity is needed
@@ -186,7 +188,12 @@ async def cleanup_worker_if_unused(worker: SharedTiffWorker):
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
-    file_path_pv = await initialize_settings(websocket)
+    # Before the worker exists: no key, no PV subscriptions or file reads.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
+    file_path_pv = await initialize_settings(websocket, session)
     if file_path_pv is None:
         return
 
@@ -219,6 +226,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
+            if is_auth_message(data):
+                await session.handle_auth_message(websocket, data)
+                continue
             if "toggleLogNormalization" in data:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 logger.info("TIFF socket log normalization toggled to: %s", worker.use_log_normalization)
@@ -230,10 +240,11 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     receiver_task = asyncio.create_task(receiver_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {sender_task, receiver_task},
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        async with session.guard(websocket):
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
         for task in done:
             exc = task.exception()
             if exc is None:
@@ -256,9 +267,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
 
 # Setup and initialization functions
 
-async def initialize_settings(websocket):
+async def initialize_settings(websocket, session=None):
     try:
-        data = await websocket.receive_text()
+        data = await receive_non_auth_text(websocket, session)
         message = json.loads(data)
 
         # Get prefix from user or use default

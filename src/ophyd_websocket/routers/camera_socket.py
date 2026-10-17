@@ -11,6 +11,8 @@ from ophyd import EpicsSignalRO
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 #from fastapi.testclient import TestClient
 
+from ..auth import authenticate_websocket, receive_non_auth_text
+
 # Set up logger
 logger = logging.getLogger(__name__)
 
@@ -54,13 +56,20 @@ router = APIRouter()
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
+    # Before any signal is created: no key, no stream.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
     # ophyd delivers subscription callbacks on Channel Access threads, so every
     # touch of `buffer` (an asyncio.Queue, which is not thread-safe) has to be
     # scheduled back onto this loop with call_soon_threadsafe.
     loop = asyncio.get_running_loop()
 
     buffer = asyncio.Queue(maxsize=1000)
-    settings_list, image_array_pv = await initialize_settings(websocket)
+    settings_list, image_array_pv = await initialize_settings(websocket, session)
+    if settings_list is None:
+        return
     logger.debug(f"Initialized settings list: {settings_list}, image array PV: {image_array_pv}")
     settingSignals = await setup_signals(settings_list, websocket)
     if settingSignals == False:
@@ -104,15 +113,16 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     put_dropping_oldest(buffer, (array_signal.get(), time.time(), False)) #load the current frame
 
 
-    await handle_streaming(websocket, buffer)
+    async with session.guard(websocket):
+        await handle_streaming(websocket, buffer)
 
 # Setup and initialization functions
 
-async def initialize_settings(websocket):
+async def initialize_settings(websocket, session=None):
     try:
-        data = await websocket.receive_text()
+        data = await receive_non_auth_text(websocket, session)
         message = json.loads(data)
-        logger.info(f"Received initialization message: {message}")
+        logger.info(f"Received initialization message with keys: {sorted(message)}")
         settings_list = default_settings_list.copy()
         image_array_pv = message.get("imageArray_PV", default_image_array_pv)
         if len(image_array_pv) == 0:

@@ -65,6 +65,29 @@ def _isolate_module_state():
     tiff_socket._workers.clear()
 
 
+@pytest.fixture(autouse=True)
+def _auth_disabled_and_queue_idle(monkeypatch):
+    """Default test world: auth off, and the queue-safety interlock on
+    WebSocket writes passes.
+
+    Without the stub a WebSocket ``set`` would query whatever Queue Server
+    happens to be running on this machine. Tests of auth or of the WS
+    interlock opt back in (see ``auth_enabled`` and ``test_auth.py``).
+    """
+    from ophyd_websocket import auth
+
+    monkeypatch.delenv("OAS_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("OAS_ALLOWED_ORIGINS", raising=False)
+    auth.clear_cache()
+
+    async def _idle():
+        return None
+
+    monkeypatch.setattr(auth, "ws_queue_safety_check", _idle)
+    yield
+    auth.clear_cache()
+
+
 @pytest.fixture
 def registry():
     """The real global device registry, restored to its prior contents after."""

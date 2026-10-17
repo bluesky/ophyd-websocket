@@ -18,6 +18,7 @@ from ophyd_websocket.routers.device_socket import router as device_socket_router
 
 # Import device registry
 from ophyd_websocket.device_registry import device_registry
+from ophyd_websocket import auth
 
 # Configure logging
 _log_level = getattr(logging, os.getenv("OAS_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -56,7 +57,10 @@ def log_environment_and_startup_info(startup_dir=None):
     # Queue Server variables with defaults
     env_vars["QSERVER_HTTP_SERVER_HOST"] = os.getenv("QSERVER_HTTP_SERVER_HOST", "localhost")
     env_vars["QSERVER_HTTP_SERVER_PORT"] = os.getenv("QSERVER_HTTP_SERVER_PORT", "60610")
-    env_vars["QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"] = os.getenv("QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY", "test")
+    # Never log the key itself.
+    env_vars["QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY"] = (
+        "set (hidden)" if os.getenv("QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY") else "not set (default 'test')"
+    )
     
     # EPICS related variables (these typically don't have defaults)
     epics_vars = ["EPICS_CA_ADDR_LIST", "EPICS_CA_AUTO_ADDR_LIST", "EPICS_CA_MAX_ARRAY_BYTES"]
@@ -89,6 +93,11 @@ def log_environment_and_startup_info(startup_dir=None):
     for var in qserver_vars:
         startup_info.append(f"  {var}: {env_vars[var]}")
     
+    startup_info.append("")
+    startup_info.append("Authentication:")
+    for line in auth.describe_config():
+        startup_info.append(f"  {line}")
+
     startup_info.append("")
     startup_info.append("EPICS Configuration:")
     for var in epics_vars:
@@ -160,6 +169,13 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
     # Startup - set startup directory from environment variable
     logger.info("[LIFESPAN] FastAPI startup event triggered")
+    if auth.auth_enabled():
+        logger.info("[LIFESPAN] API-key auth enabled; validating keys against %s", auth.qserver_url())
+    else:
+        logger.warning(
+            "[LIFESPAN] AUTH DISABLED: anyone who can reach this server can read and write devices. "
+            "Set OAS_AUTH_ENABLED=true to require Queue Server API keys."
+        )
     
     # Get startup directory from environment variable set by main process
     startup_dir = os.getenv("OAS_STARTUP_DIR")
@@ -204,22 +220,7 @@ BASE_HTTP_URL = f"http://{OAS_HOST}:{OAS_PORT}"
 # Parse additional CORS origins from environment variable
 def parse_allowed_origins():
     """Parse OAS_ALLOWED_ORIGINS environment variable"""
-    oas_origins = os.getenv("OAS_ALLOWED_ORIGINS", "")
-    if not oas_origins:
-        return []
-    
-    # Handle both single string and comma-separated list
-    if oas_origins.startswith("[") and oas_origins.endswith("]"):
-        # Handle array-like format: ["origin1", "origin2"]
-        try:
-            import json
-            return json.loads(oas_origins)
-        except json.JSONDecodeError:
-            logger.warning(f"Invalid JSON format in OAS_ALLOWED_ORIGINS: {oas_origins}")
-            return []
-    else:
-        # Handle comma-separated string: "origin1,origin2"
-        return [origin.strip() for origin in oas_origins.split(",") if origin.strip()]
+    return auth.parse_allowed_origins()
 
 # Configure CORS
 origins = [
@@ -306,6 +307,16 @@ def list_websockets():
                 "example_url": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "protocol": "ZMQ bridge to WebSocket"
             },
+        },
+        "authentication": {
+            "description": "When OAS_AUTH_ENABLED=true, every socket's first message must be "
+                           "{\"action\": \"auth\", \"api_key\": \"<Queue Server API key>\"}; the server replies "
+                           "{\"action\": \"auth\", \"ok\": true, \"permissions\": {...}} or closes with 1008 "
+                           "(invalid/insufficient) or 1013 (auth service unavailable). REST calls send "
+                           "'Authorization: ApiKey <key>'. Clients may always send the auth message; with "
+                           "auth disabled it is simply acknowledged.",
+            "enabled": auth.auth_enabled(),
+            "example_messages": {"auth_example": {"action": "auth", "api_key": "<Queue Server API key>"}},
         },
         "connection_info": {
             "protocol": "WebSocket",
