@@ -461,7 +461,7 @@ Permissions come from the key's **effective scopes** as reported by the Queue Se
 
 These stay public by design: `GET /`, `GET /api/v1/websockets`, `/docs`, `/openapi.json`.
 
-Writes still go through the queue-safety interlock: a busy queue gives 423 over REST and `"code": "queue_busy"` on a socket. Over WebSocket this check is new; before, only the REST PUTs had it. The interlock queries the Queue Server with the **server's** own key, `QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY`, never the user's key, and `OAS_REQUIRE_QSERVER` has no effect on auth.
+Writes still go through the queue-safety interlock: a busy queue gives 423 over REST and `"code": "queue_busy"` on a socket. Socket writes are only checked **when auth is enabled**; with auth off, the sockets make no Queue Server calls at all, exactly as before. The interlock queries the Queue Server with the **server's** own key, `QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY`, never the user's key, and `OAS_REQUIRE_QSERVER` has no effect on auth.
 
 ### REST
 Send the key in a header. Keys in the URL are ignored.

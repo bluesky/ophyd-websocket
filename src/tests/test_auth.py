@@ -880,3 +880,20 @@ def test_startup_banner_hides_the_server_qserver_key(monkeypatch, caplog):
     assert "super-secret-server-key" not in caplog.text
     assert "set (hidden)" in caplog.text
     assert "OAS_AUTH_ENABLED: false" in caplog.text
+
+
+def test_disabled_auth_makes_no_queue_server_calls_on_ws_writes(client, pv_signals, monkeypatch):
+    calls = []
+
+    async def busy():
+        calls.append(True)
+        raise HTTPException(status_code=423, detail="Queue is running")
+
+    monkeypatch.setattr(auth, "ws_queue_safety_check", busy)
+
+    with client.websocket_connect("/api/v1/pv-socket") as ws:
+        subscribe_pv(ws)
+        assert set_and_get_reply(ws, value=6) is None
+
+    assert calls == []
+    assert pv_signals["IOC:m1"].set_calls == [6]

@@ -480,7 +480,12 @@ async def authorize_ws_write(websocket: WebSocket, session: WsAuthSession) -> bo
     """Gate one WebSocket write: fresh permission check, then queue safety.
 
     Sends ``{"error", "code"}`` and returns False if the write must not run.
+    With auth disabled this is a no-op, so sockets behave exactly as they did
+    before auth existed (no Queue Server calls at all).
     """
+    if not session.enabled:
+        return True
+
     try:
         await session.require_write()
     except AuthError as exc:
