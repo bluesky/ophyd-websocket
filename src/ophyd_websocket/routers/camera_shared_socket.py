@@ -15,6 +15,7 @@ from ophyd import EpicsSignalRO
 from ophyd_async.core import SignalR
 
 from ophyd_websocket.async_runtime import run_in_bluesky_loop
+from ophyd_websocket.auth import authenticate_websocket, is_auth_message
 from ophyd_websocket.device_registry import device_registry, is_camera_device
 
 from .camera_socket import initialize_settings, update_enum_lists
@@ -529,10 +530,16 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None, devic
     """
     await websocket.accept()
 
+    # Before any worker exists: an unauthenticated client must not start
+    # polling a camera or open CA channels.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
     if device:
         worker, error = await get_or_create_registry_worker(device)
     else:
-        settings_list, image_array_pv = await initialize_settings(websocket)
+        settings_list, image_array_pv = await initialize_settings(websocket, session)
         if settings_list is None or image_array_pv is None:
             return
         worker, error = await get_or_create_worker(image_array_pv, settings_list)
@@ -574,6 +581,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None, devic
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
+            if is_auth_message(data):
+                await session.handle_auth_message(websocket, data)
+                continue
             if "toggleLogNormalization" in data and worker.supports_log_normalization:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 await websocket.send_text(json.dumps({"logNormalization": worker.use_log_normalization}))
@@ -582,10 +592,11 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None, devic
     receiver_task = asyncio.create_task(receiver_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {sender_task, receiver_task},
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        async with session.guard(websocket):
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
         for task in done:
             exc = task.exception()
             if exc is None:

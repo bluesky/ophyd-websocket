@@ -21,6 +21,8 @@ import numpy as np
 from PIL import Image
 from fastapi import WebSocket, WebSocketDisconnect
 
+from ..auth import WsAuthSession, is_auth_message, receive_non_auth_text
+
 logger = logging.getLogger(__name__)
 
 max_dimension = 2500  # maximum pixel width or height to be sent out. Increase if higher fidelity is needed
@@ -58,18 +60,24 @@ def convert_byte_array_to_string(byte_array):
         return str(byte_array)
 
 
-async def receive_init_message(websocket) -> dict:
+# Credentials are only ever accepted in the auth message, never in a URL.
+_CREDENTIAL_KEYS = {"api_key", "apikey", "apiKey", "token"}
+
+
+async def receive_init_message(websocket, session=None) -> dict:
     """First client message merged with the socket URL's query parameters.
 
     Canvas components (finch's TIFFCanvas) send a fixed first message, so the
     query string (``/h5-socket?prefix=...&dataset=...``) is how a UI points
     them at an arbitrary detector. Query parameters win over the message.
+    Leading ``auth`` messages are acknowledged and skipped.
     """
-    message = json.loads(await websocket.receive_text())
+    message = json.loads(await receive_non_auth_text(websocket, session))
     if not isinstance(message, dict):
         raise ValueError("Init message must be a JSON object")
     query = {k: v for k, v in getattr(websocket, "query_params", {}).items() if v != ""}
-    return {**message, **query}
+    merged = {**message, **query}
+    return {k: v for k, v in merged.items() if k not in _CREDENTIAL_KEYS}
 
 
 # --------------------------------------------------------------------------
@@ -427,8 +435,11 @@ class WorkerRegistry:
             self.workers.pop(worker.worker_key, None)
 
 
-async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, registry: WorkerRegistry, label: str = "file"):
-    """Stream ``worker``'s frames to ``websocket`` until it disconnects."""
+async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, registry: WorkerRegistry,
+                       label: str = "file", session: WsAuthSession | None = None):
+    """Stream ``worker``'s frames to ``websocket`` until it disconnects
+    (or, with auth on, until the session's key stops validating)."""
+    session = session or WsAuthSession(need="read")
     worker.sockets.add(websocket)
 
     async def sender_loop():
@@ -452,6 +463,9 @@ async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, regi
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
+            if is_auth_message(data):
+                await session.handle_auth_message(websocket, data)
+                continue
             if "toggleLogNormalization" in data:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 logger.info("%s socket log normalization toggled to: %s", label, worker.use_log_normalization)
@@ -463,10 +477,11 @@ async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, regi
     receiver_task = asyncio.create_task(receiver_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {sender_task, receiver_task},
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        async with session.guard(websocket):
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
         for task in done:
             exc = task.exception()
             if exc is None:

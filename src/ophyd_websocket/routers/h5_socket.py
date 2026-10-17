@@ -28,6 +28,7 @@ import numpy as np
 from fastapi import APIRouter, WebSocket
 from ophyd import EpicsSignalRO
 
+from ..auth import authenticate_websocket
 from .file_image_worker import (
     SharedFileImageWorker,
     WorkerRegistry,
@@ -226,9 +227,9 @@ async def cleanup_worker_if_unused(worker: SharedFileImageWorker):
     await _registry.cleanup_if_unused(worker)
 
 
-async def initialize_settings(websocket):
+async def initialize_settings(websocket, session=None):
     try:
-        message = await receive_init_message(websocket)
+        message = await receive_init_message(websocket, session)
         file_path_pv, trigger_pvs, dataset = resolve_h5_pvs(message)
         logger.info("Using HDF5 file path PV: %s (triggers: %s, dataset: %s)",
                     file_path_pv, trigger_pvs, dataset or "auto")
@@ -244,7 +245,12 @@ async def initialize_settings(websocket):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
 
-    settings = await initialize_settings(websocket)
+    # Before the worker exists: no key, no PV subscriptions or file reads.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
+    settings = await initialize_settings(websocket, session)
     if settings is None:
         return
     file_path_pv, trigger_pvs, dataset = settings
@@ -255,4 +261,4 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close()
         return
 
-    await serve_worker(websocket, worker, _registry, label="HDF5")
+    await serve_worker(websocket, worker, _registry, label="HDF5", session=session)

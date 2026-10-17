@@ -10,6 +10,7 @@ from ophyd import EpicsSignalRO
 from fastapi import APIRouter, WebSocket
 
 from . import file_image_worker
+from ..auth import authenticate_websocket
 from .file_image_worker import (  # noqa: F401  (re-exported for callers/tests)
     SharedFileImageWorker,
     WorkerRegistry,
@@ -66,7 +67,12 @@ async def cleanup_worker_if_unused(worker: SharedFileImageWorker):
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
-    file_path_pv = await initialize_settings(websocket)
+    # Before the worker exists: no key, no PV subscriptions or file reads.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
+    file_path_pv = await initialize_settings(websocket, session)
     if file_path_pv is None:
         return
 
@@ -76,7 +82,7 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         await websocket.close()
         return
 
-    await serve_worker(websocket, worker, _registry, label="TIFF")
+    await serve_worker(websocket, worker, _registry, label="TIFF", session=session)
 
 # Setup and initialization functions
 
@@ -101,9 +107,9 @@ def resolve_tiff_pv(message: dict) -> str:
     return f"{prefix.rstrip(':')}:{plugin}:FullFileName_RBV"
 
 
-async def initialize_settings(websocket):
+async def initialize_settings(websocket, session=None):
     try:
-        message = await receive_init_message(websocket)
+        message = await receive_init_message(websocket, session)
         file_path_pv = resolve_tiff_pv(message)
 
         logger.info("Using TIFF file path PV: %s", file_path_pv)

@@ -428,6 +428,97 @@ sequenceDiagram
         deactivate Ophyd-Websocket
 ```
 
+# Authentication
+ophyd-websocket can require the **same API keys you already use for the Bluesky Queue Server HTTP server**. It has no users or keys of its own: for each key it calls the Queue Server's `GET /api/auth/scopes` and enforces what the key is allowed to do. One key works for both servers, so there's no second login.
+
+Auth is **off by default**. When it's off, the server logs a warning at startup and anyone who can reach it can read and write. Turn it on with:
+
+```bash
+OAS_AUTH_ENABLED=true OAS_AUTH_QSERVER_URL=http://qserver-api:60610 ophyd-websocket --startup-dir ./startup
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OAS_AUTH_ENABLED` | `false` | Require API keys on every REST route and socket (except the public ones listed below). |
+| `OAS_AUTH_QSERVER_URL` | `http://$QSERVER_HTTP_SERVER_HOST:$QSERVER_HTTP_SERVER_PORT` | Queue Server HTTP server that validates keys. Use a private, service-to-service address. |
+| `OAS_AUTH_READ_SCOPE` | `read:monitor` | Scope needed to read, subscribe and stream. |
+| `OAS_AUTH_WRITE_SCOPE` | `write:queue:control` | Scope needed to set PVs and devices, and to reload devices. |
+| `OAS_AUTH_CONSOLE_SCOPE` | `read:console` | Scope needed for `/qs-console-socket`. |
+| `OAS_AUTH_TIMEOUT` | `3` | Seconds to wait for the Queue Server. |
+| `OAS_AUTH_WS_HANDSHAKE_TIMEOUT` | `5` | Seconds a socket has to send its auth message. |
+| `OAS_AUTH_REVALIDATE_SECONDS` | `30` | How often open sockets re-check their key. |
+| `OAS_AUTH_READ_CACHE_SECONDS` | `10` | How long a successful read check is reused. |
+| `OAS_ALLOWED_ORIGINS` | unset | When set, browsers whose `Origin` isn't listed are refused on every socket. |
+
+### What each key can do
+Permissions come from the key's **effective scopes** as reported by the Queue Server, not from role names. A role called "operator" whose key was issued with restricted scopes only gets those scopes. Out of the box:
+
+| Operation | Needs | Observer key | Key with `write:queue:control` |
+|---|---|---|---|
+| REST GETs, `POST /pvs/{pv}`, pv-/device-socket subscribe and refresh, camera, TIFF and HDF5 streams | `read:monitor` | yes | yes |
+| `PUT /pvs`, `PUT /devices`, `POST /load-devices`, the socket `set` action | `write:queue:control` | **no (403 / `forbidden`)** | yes |
+| `/qs-console-socket` | `read:console` | yes | yes |
+
+These stay public by design: `GET /`, `GET /api/v1/websockets`, `/docs`, `/openapi.json`.
+
+Writes still go through the queue-safety interlock: a busy queue gives 423 over REST and `"code": "queue_busy"` on a socket. Over WebSocket this check is new; before, only the REST PUTs had it. The interlock queries the Queue Server with the **server's** own key, `QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY`, never the user's key, and `OAS_REQUIRE_QSERVER` has no effect on auth.
+
+### REST
+Send the key in a header. Keys in the URL are ignored.
+
+```bash
+curl -H "Authorization: ApiKey $KEY" http://localhost:8001/api/v1/auth/permissions
+# {"authEnabled": true, "read": true, "write": false, "console": true, "roles": ["observer"]}
+```
+
+| Status | Meaning |
+|---|---|
+| 401 | Key missing, invalid, expired or revoked |
+| 403 | Valid key, but missing the scope this route needs |
+| 503 | The Queue Server couldn't validate the key. Requests are refused, never allowed. |
+
+### WebSockets
+Browsers can't set headers on a WebSocket, so the key goes in the **first message** on every socket. Send it before any `subscribe` or init message:
+
+```json
+{"action": "auth", "api_key": "<Queue Server API key>"}
+```
+
+Replies:
+
+```json
+{"action": "auth", "ok": true, "permissions": {"read": true, "write": false, "console": true}}
+{"action": "auth", "ok": false, "error": "invalid or missing API key", "code": "unauthorized"}
+```
+
+- **Failure:** after the `ok: false` reply the server closes with **1008**. If the auth service is unavailable it closes with **1013** (try again later). This also happens if the first message isn't an auth message, is larger than 4 KB, or doesn't arrive within 5 s. Nothing is subscribed, and no camera or file worker is started, until auth succeeds.
+- **Writes:** every `set` re-checks the key with the Queue Server at that moment, so a key that is revoked or downgraded mid-session can't keep writing. A denied write replies `{"error": "...", "code": "forbidden" | "unauthorized" | "auth_unavailable" | "queue_busy"}` and nothing is written. `subscribeReadOnly` is *not* a permission boundary; the server checks every `set`.
+- **Revalidation:** an open socket re-checks its key every `OAS_AUTH_REVALIDATE_SECONDS`. If the key has been revoked or lost its scope, or the Queue Server can't be reached, the socket gets an `ok: false` message and is closed (1008 or 1013). Trade-off: a revoked key may keep *reading* for up to about 30 s plus the 10 s read cache, while writes stop immediately.
+- **Changing key:** sending another `auth` message mid-session switches to the new key if it's valid. If it isn't, the session keeps the old key and gets an `ok: false` reply.
+- **Auth disabled:** clients may always send the auth message. When auth is off it's simply acknowledged with full permissions, so one client works against both kinds of server.
+
+```bash
+websocat ws://localhost:8001/api/v1/pv-socket
+{"action": "auth", "api_key": "<key>"}
+{"action": "subscribe", "pv": "SIM:temp:Setpoint"}
+```
+
+Neither keys nor auth messages are ever logged; logs show an 8-character sha256 fingerprint instead. The startup banner shows only whether `QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY` is set, never its value.
+
+### Using it from Finch
+- **Which key:** use the key Finch already sends to the Queue Server, `qServerApiKey` from `FinchConfigProvider` (or the default Queue Server client's `getApiKey()`). Don't add a second key prompt.
+- **Connecting:** on every ophyd socket, including camera, TIFF and HDF5, send the auth message in `onopen`. Send subscriptions or init messages only after `{"action": "auth", "ok": true}`. Authenticate again on every reconnect.
+- **Write controls:** use `permissions.write`, or `GET /api/v1/auth/permissions`, to disable them for observers. The server enforces this regardless of the UI.
+- **Reference code:** [react_examples/useOphydPVSocket.tsx](react_examples/useOphydPVSocket.tsx) and [useOphydDeviceSocket.tsx](react_examples/useOphydDeviceSocket.tsx) show the pattern with an `apiKey` option.
+
+> The hooks in the published `@blueskyproject/finch` package (0.1.x) don't send an auth message yet. Leave `OAS_AUTH_ENABLED` off for Finch UIs until Finch is updated.
+
+### Deployment notes
+- Serve over **HTTPS/WSS**. The key travels on every request and in the first socket message.
+- Point `OAS_AUTH_QSERVER_URL` at the Queue Server over a private network, not a public URL.
+- Set `OAS_ALLOWED_ORIGINS` to your UI's origin(s). The CORS list currently also contains `*`, so for browsers the Origin check on sockets is what actually restricts them.
+- `POST /load-devices` requires the write scope but, like before, doesn't run the queue-safety check.
+
 # Experimental Features
 In addition to subscribing to devices and setting their values, there are some additional experimental websockets and REST API endpoints available in this project.
 

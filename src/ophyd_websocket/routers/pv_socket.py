@@ -6,6 +6,8 @@ import logging
 from ophyd import EpicsSignalRO, EpicsSignal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, FastAPI
 
+from ..auth import authenticate_websocket, authorize_ws_write, is_auth_message
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -53,6 +55,11 @@ def _names_from(data, singular_key, plural_key):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("Client connected to /pv-socket")
+
+    # Before any signal is created: no key, no subscriptions.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
 
     try:
         loop = asyncio.get_running_loop()
@@ -257,6 +264,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"error": f"PV {pv_name} is not subscribed. Subscribe to PV before setting value."})
             return
 
+        if not await authorize_ws_write(websocket, session):
+            return
+
         signal = subscriptions.get(pv_name)
         if signal.write_access == False:
             await websocket.send_json({"error": f"Write access is not enabled for PV {pv_name}. Cannot set value."})
@@ -298,44 +308,49 @@ async def websocket_endpoint(websocket: WebSocket):
     sub_handles = {}
 
     try:
-        while True:
-            message = await websocket.receive_text()
-            try:
-                data = json.loads(message)
-                action = data.get("action")
-                logger.info(f"action={action} payload_keys={list(data.keys())}")
+        async with session.guard(websocket):
+            while True:
+                message = await websocket.receive_text()
+                try:
+                    data = json.loads(message)
+                    if is_auth_message(data):
+                        await session.handle_auth_message(websocket, data)
+                        continue
+                    action = data.get("action")
+                    logger.info(f"action={action} payload_keys={list(data.keys())}")
 
-                valid_actions = {"subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set"}
-                if action not in valid_actions:
-                    await websocket.send_json({
-                        "error": (
-                            f"Received action: {action}, actions must be 'subscribe', 'unsubscribe', 'refresh', "
-                            "'subscribeSafely', 'subscribeReadOnly', or 'set'. "
-                            "Example msg: {action: 'subscribe', pv: 'IOC:m1'}"
-                        )
-                    })
-                    logger.error(f"Received invalid action: {action}")
-                    continue
+                    valid_actions = {"subscribe", "unsubscribe", "refresh", "subscribeSafely", "subscribeReadOnly", "set"}
+                    if action not in valid_actions:
+                        await websocket.send_json({
+                            "error": (
+                                f"Received action: {action}, actions must be 'subscribe', 'unsubscribe', 'refresh', "
+                                "'subscribeSafely', 'subscribeReadOnly', or 'set'. "
+                                "Example msg: {action: 'subscribe', pv: 'IOC:m1'}"
+                            )
+                        })
+                        logger.error(f"Received invalid action: {action}")
+                        continue
 
-                if action == "subscribe":
-                    await handleSubscribe(data)
-                elif action == "subscribeSafely":
-                    await handleSubscribe(data, requireConnection=True)
-                elif action == "subscribeReadOnly":
-                    await handleSubscribe(data, requireConnection=False, readOnly=True)
-                elif action == "unsubscribe":
-                    await handleUnsubscribe(data)
-                elif action == "refresh":
-                    await handleRefresh()
-                elif action == "set":
-                    await handleSet(data)
+                    if action == "subscribe":
+                        await handleSubscribe(data)
+                    elif action == "subscribeSafely":
+                        await handleSubscribe(data, requireConnection=True)
+                    elif action == "subscribeReadOnly":
+                        await handleSubscribe(data, requireConnection=False, readOnly=True)
+                    elif action == "unsubscribe":
+                        await handleUnsubscribe(data)
+                    elif action == "refresh":
+                        await handleRefresh()
+                    elif action == "set":
+                        await handleSet(data)
 
-            except json.JSONDecodeError:
-                await websocket.send_json({"error": "Invalid JSON format"})
-                logger.error(f"Received invalid JSON: {message}")
-            except Exception as e:
-                await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
-                logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"error": "Invalid JSON format"})
+                    # Never log the raw message: it may carry an API key.
+                    logger.error("Received invalid JSON (%d chars)", len(message))
+                except Exception as e:
+                    await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
+                    logger.error(f"Unexpected error: {str(e)}", exc_info=True)
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}", exc_info=True)
     finally:
