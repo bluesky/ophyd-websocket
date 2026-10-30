@@ -7,6 +7,7 @@ from ophyd import EpicsSignalRO, EpicsSignal
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, FastAPI
 
 from ..auth import authenticate_websocket, authorize_ws_write, is_auth_message
+from ..writes import cancel_writes, start_write
 
 logger = logging.getLogger(__name__)
 
@@ -282,8 +283,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"error": f"Value must be a number. Could not set value of {pv_name} to {value}"})
             return
 
-        timeout = data.get("timeout", 1)
-        if not isinstance(timeout, (int, float)):
+        # No timeout by default: wait for the write to complete (e.g. a motor
+        # PV's whole move). A fixed 1 s default reported longer writes as failed.
+        timeout = data.get("timeout")
+        if timeout is not None and not isinstance(timeout, (int, float)):
             await websocket.send_json({"error": f"Timeout must be a number. Could not set value of {pv_name} to {value}"})
             return
 
@@ -296,16 +299,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"error": f"Value {value} is outside of limits for PV {pv_name}. Low limit: {low_limit}, High limit: {high_limit}"})
                     return
 
-        try:
-            if isinstance(value, str):
-                signal.put(value, wait=True, timeout=timeout, use_complete=True)
-            else:
-                signal.set(value).wait(timeout=timeout)
-        except Exception as error:
-            await websocket.send_json({"error": f"Could not set value of {pv_name} to {value}: {str(error)}"})
+        # In the background so the socket keeps streaming updates meanwhile.
+        # Success stays silent, as before; failures are reported when known.
+        start_write(websocket, write_tasks, signal, pv_name, value, timeout, report_success=False)
 
     subscriptions = {}
     sub_handles = {}
+    write_tasks = set()
 
     try:
         async with session.guard(websocket):
@@ -354,6 +354,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in websocket loop: {str(e)}", exc_info=True)
     finally:
+        await cancel_writes(write_tasks)
         # Drop every subscription this connection created so no CA monitor
         # outlives the socket and fires a callback into a dead event loop.
         for pv_name in list(subscriptions):

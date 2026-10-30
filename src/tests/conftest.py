@@ -51,18 +51,23 @@ def event_loop():
 def _isolate_module_state():
     """Reset the module-level state the routers keep between requests.
 
-    ``core_api.pv_dict`` and the camera/TIFF shared-worker registries are
-    process globals; leaking them across tests makes ordering matter.
+    ``core_api.pv_dict``, the camera/TIFF shared-worker registries and the
+    image sockets' per-PV signal caches are process globals; leaking them
+    across tests makes ordering matter (and would hand one test's fake
+    signals to the next).
     """
-    from ophyd_websocket.routers import camera_shared_socket, core_api, tiff_socket
+    from ophyd_websocket.routers import camera_shared_socket, camera_socket, core_api, tiff_socket
 
-    core_api.pv_dict.clear()
-    camera_shared_socket._workers.clear()
-    tiff_socket._workers.clear()
+    def reset():
+        core_api.pv_dict.clear()
+        camera_shared_socket._workers.clear()
+        tiff_socket._workers.clear()
+        for module in (camera_socket, camera_shared_socket, tiff_socket):
+            module._signals.clear()
+
+    reset()
     yield
-    core_api.pv_dict.clear()
-    camera_shared_socket._workers.clear()
-    tiff_socket._workers.clear()
+    reset()
 
 
 @pytest.fixture(autouse=True)

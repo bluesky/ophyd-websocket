@@ -115,8 +115,14 @@ class FakeSignalBase:
         self.subscriptions.clear()
         self.subs_by_id.clear()
 
-    def clear_sub(self, sub_id):
-        self.cleared_subs.append(sub_id)
+    def clear_sub(self, cb, event_type=None):
+        """Like ophyd: remove subscriptions by *callback*. Passing a sub id
+        matches nothing and silently removes nothing, exactly as ophyd does."""
+        self.cleared_subs.append(cb)
+        for sub_id, (et, callback) in list(self.subs_by_id.items()):
+            if callback == cb and event_type in (None, et):
+                self.unsubscribe(sub_id)
+                self.unsubscribed_ids.remove(sub_id)
 
     def _reset_sub(self, event_type=None):
         self.reset_subs.append(event_type)

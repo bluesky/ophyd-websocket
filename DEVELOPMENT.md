@@ -378,6 +378,25 @@ rather than 512×512 at 10 Hz (~2 MB/s). Turn it up at runtime via `SizeX` /
 would mean building EPICS base from source for aarch64 and pointing
 `PYEPICS_LIBCA` at the result.
 
+**The pin needs BuildKit (`docker buildx`).** Without the buildx plugin,
+compose falls back to the legacy builder, which ignores `FROM --platform` when
+the base image is already cached locally as arm64 (it is, if any other project
+pulled `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` natively). The build
+then succeeds but produces an arm64 image that crashes with the `libca.so`
+error above. With Docker 29's default containerd image store,
+`docker build --platform linux/amd64` fails outright on the legacy builder
+too. colima installs neither buildx nor the `docker compose` plugin, so check:
+
+```bash
+docker buildx version          # must work
+docker image inspect ophyd-websocket-ophyd-websocket --format '{{.Architecture}}'   # must be amd64
+```
+
+If buildx is missing, `brew install docker-buildx` and link it as Homebrew
+instructs, or drop the release binary for your platform from
+<https://github.com/docker/buildx/releases> into `~/.docker/cli-plugins/docker-buildx`
+(`chmod +x`). Then rebuild with `--build` and check the architecture again.
+
 ## Two frontend gotchas worth knowing
 
 - **The SPA does not use `<React.StrictMode>`.** finch's camera hook opens its

@@ -419,7 +419,20 @@ async def test_worker_stop_clears_the_path_subscription(path_signal):
 
     await worker.stop()
 
-    assert path_signal[FILE_PATH_PV].cleared_subs
+    assert path_signal[FILE_PATH_PV].subscriptions == {}
+
+
+async def test_stopped_worker_ignores_late_file_path_updates(path_signal):
+    # A path_cb queued with call_soon_threadsafe can land after stop(); it
+    # must not start decoding again on a worker nobody is watching.
+    worker, _ = await tiff_socket.get_or_create_worker(FILE_PATH_PV)
+    await wait_for_frame(worker)
+    await worker.stop()
+
+    worker._enqueue_file_path("/late/update.tiff")
+
+    assert worker.pending_file_path is None
+    assert worker.processing_task is None
 
 
 async def test_cleanup_removes_unused_worker(path_signal):

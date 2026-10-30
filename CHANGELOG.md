@@ -80,6 +80,43 @@ Queue Server API-key auth (`feat/staging-auth`).
   message, so a client can always authenticate first.
 - `OAS_ALLOWED_ORIGINS` parsing moved to `ophyd_websocket.auth`.
 
+### Fixed
+- Reloading a page that streams images no longer leaks work until the server
+  runs out of memory. `/tiff-socket` and `/camera-socket-shared` workers
+  called `clear_sub(sub_id)`, which ophyd silently ignores because it takes
+  the callback, so their PV monitors outlived the last socket. An orphaned
+  TIFF worker re-decoded every new file forever. They now use
+  `unsubscribe(sub_id)`, and a stopped worker ignores callbacks that were
+  already queued.
+- `/camera-socket` now drops its array and settings subscriptions when the
+  socket closes, including early-error paths. It stops on any disconnect,
+  not just `WebSocketDisconnect`. Before, every reload left a set of CA
+  callbacks filling a queue that nothing read.
+- The image sockets reuse one `EpicsSignalRO` per PV instead of creating new
+  ones per connection or worker. pyepics never frees a signal that opened a
+  channel, so each reload leaked about 10 signals, and each one kept
+  processing every frame.
+- `docker-compose.yml` sets `MALLOC_ARENA_MAX=2` and
+  `MALLOC_MMAP_THRESHOLD_=131072` for `ophyd-websocket`, so glibc returns
+  the large arrays decoded on worker threads to the OS instead of keeping
+  them in per-thread arenas.
+- The TIFF and shared-camera sockets always cancel their sender and receiver
+  tasks, even when sending the final error to an already-closed socket fails.
+- The test fake's `clear_sub` now behaves like ophyd's, so tests can no
+  longer pass with a teardown that never works.
+- Socket writes (`set` on `/device-socket` and `/pv-socket`) no longer
+  freeze the server while a device moves. `set().wait()` ran on the event
+  loop, so every socket's updates queued up and arrived in one burst when
+  the move ended. Writes now run in a worker thread as a background task
+  (`ophyd_websocket.writes`), so readbacks stream live and the socket can
+  take a new target mid-move.
+- `set` no longer defaults to a 1 s timeout, which reported every longer
+  move as failed while the motor kept going. It now waits for the move to
+  finish unless the client sends a `timeout`. A timeout reply says the
+  device may still be moving. `/pv-socket` still sends nothing on success.
+- `qserver` image: install `matplotlib`, which the built-in simulated profile
+  imports. Without it, opening the RE environment failed and no plan could run.
+
 ## [0.1.0]
 
 First release.

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import time
 import numpy as np
@@ -52,6 +53,20 @@ default_image_array_pv = "13SIM1:image1:ArrayData"
 router = APIRouter()
 
 
+# One signal per PV for the life of the process. pyepics keeps every signal
+# that ever opened a channel reachable from its PV cache, so a new
+# EpicsSignalRO per connection was never freed and kept processing every update.
+# Callbacks are still added and removed per connection.
+_signals: dict[str, EpicsSignalRO] = {}
+
+
+def get_signal(pv: str, name: str) -> EpicsSignalRO:
+    signal = _signals.get(pv)
+    if signal is None:
+        signal = _signals[pv] = EpicsSignalRO(pv, name=name)
+    return signal
+
+
 @router.websocket("/camera-socket")
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
@@ -91,30 +106,41 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         update_dimensions(settingSignals, buffer, loop=loop)
 
 
-    for key in settingSignals:
-        settingSignals[key].subscribe(settings_cb)
-
+    # (signal, sub_id) for every subscription this socket owns, so they can all
+    # be dropped when it closes. Left running, the CA callbacks keep feeding a
+    # queue nobody reads, one more set per page reload.
+    subscriptions = []
     try:
-        array_signal = EpicsSignalRO(image_array_pv, name='array_signal')
-        array_signal.get()
-    except Exception as e:
-        await websocket.send_text(json.dumps({'error': str(e)}))
-        await websocket.close()
-        return
+        for key in settingSignals:
+            subscriptions.append((settingSignals[key], settingSignals[key].subscribe(settings_cb)))
 
-    if not await check_array_connection(array_signal, image_array_pv, websocket):
-        return
-    array_signal.subscribe(array_cb)
+        try:
+            array_signal = get_signal(image_array_pv, name='array_signal')
+            array_signal.get()
+        except Exception as e:
+            await websocket.send_text(json.dumps({'error': str(e)}))
+            await websocket.close()
+            return
 
-    # Enqueue the dimensions directly (not via settings_cb) so they are ahead of
-    # the first frame in the queue; a deferred call_soon_threadsafe would land
-    # after the frame below and leave the streamer with nothing to reshape with.
-    update_dimensions(settingSignals, buffer)
-    put_dropping_oldest(buffer, (array_signal.get(), time.time(), False)) #load the current frame
+        if not await check_array_connection(array_signal, image_array_pv, websocket):
+            return
+        subscriptions.append((array_signal, array_signal.subscribe(array_cb)))
+
+        # Enqueue the dimensions directly (not via settings_cb) so they are ahead of
+        # the first frame in the queue; a deferred call_soon_threadsafe would land
+        # after the frame below and leave the streamer with nothing to reshape with.
+        update_dimensions(settingSignals, buffer)
+        put_dropping_oldest(buffer, (array_signal.get(), time.time(), False)) #load the current frame
 
 
-    async with session.guard(websocket):
-        await handle_streaming(websocket, buffer)
+        async with session.guard(websocket):
+            await handle_streaming(websocket, buffer)
+    finally:
+        for signal, sub_id in subscriptions:
+            try:
+                signal.unsubscribe(sub_id)
+            except Exception:
+                logger.exception("Error unsubscribing camera socket callback")
 
 # Setup and initialization functions
 
@@ -152,7 +178,7 @@ async def setup_signals(settings_list, websocket):
     settingSignals = {}
     try:
         for item in settings_list:
-            signal = EpicsSignalRO(item['pv'], name=item['name'])
+            signal = get_signal(item['pv'], name=item['name'])
             signal.get()
             settingSignals[item['name']] = signal
     except Exception as e:
@@ -232,31 +258,37 @@ def update_dimensions(settingSignals, buffer, loop=None):
 # Main loop for streaming images
 async def handle_streaming(websocket, buffer):
     global use_log_normalization  # Use the global variable to toggle normalization
+
+    # Start a background task to listen for client messages
+    async def listen_for_client_messages():
+        global use_log_normalization
+        while True:
+            try:
+                message = await websocket.receive_text()
+                data = json.loads(message)
+                if "toggleLogNormalization" in data:
+                    use_log_normalization = data["toggleLogNormalization"]
+                    logger.info(f"Log normalization toggled to: {use_log_normalization}")
+                    await websocket.send_text(json.dumps({"logNormalization": use_log_normalization}))
+            except (WebSocketDisconnect, RuntimeError):
+                # RuntimeError: the socket is already closed. Retrying would spin.
+                # Wake the streamer too, which may be idle on an empty buffer
+                # (e.g. acquisition stopped) and would never see the disconnect.
+                put_dropping_oldest(buffer, None)
+                break
+            except Exception as e:
+                logger.error(f"Error processing client message: {e}")
+
+    # Run the listener in the background
+    listener = asyncio.create_task(listen_for_client_messages())
     try:
-
-        # Start a background task to listen for client messages
-        async def listen_for_client_messages():
-            global use_log_normalization
-            while True:
-                try:
-                    message = await websocket.receive_text()
-                    data = json.loads(message)
-                    if "toggleLogNormalization" in data:
-                        use_log_normalization = data["toggleLogNormalization"]
-                        logger.info(f"Log normalization toggled to: {use_log_normalization}")
-                        await websocket.send_text(json.dumps({"logNormalization": use_log_normalization}))
-                except WebSocketDisconnect:
-                    break
-                except Exception as e:
-                    logger.error(f"Error processing client message: {e}")
-
-        # Run the listener in the background
-        asyncio.create_task(listen_for_client_messages())
-
         currentSettings = None
 
         while True:
-            rawImageArray, timestamp, updatedSettings = await buffer.get()
+            item = await buffer.get()
+            if item is None:  # client disconnected
+                break
+            rawImageArray, timestamp, updatedSettings = item
 
             if updatedSettings:
                 currentSettings = updatedSettings
@@ -278,8 +310,17 @@ async def handle_streaming(websocket, buffer):
             else:
                 await websocket.send_bytes(bufferedResult.getvalue())
 
-    except WebSocketDisconnect:
-        await websocket.close()
+    except Exception as e:
+        # A reload usually surfaces as RuntimeError or the server's own
+        # ConnectionClosed, not WebSocketDisconnect; any of them ends the stream.
+        if not isinstance(e, WebSocketDisconnect):
+            logger.info(f"Camera stream ended: {type(e).__name__}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close()
+    finally:
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await listener
 
 def normalize_array_data(array_data, dataType):
     global use_log_normalization

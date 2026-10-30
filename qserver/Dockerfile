@@ -16,7 +16,11 @@ RUN pip install --no-cache-dir \
         bluesky-httpserver==0.0.14 \
         # Imported by the HTTP server's spreadsheet upload route but not
         # declared as a dependency, so it fails to start without it.
-        pandas
+        pandas \
+        # Imported by the built-in simulated profile (05-run-engine.py) but not
+        # declared as a dependency; without it "open environment" fails with
+        # ModuleNotFoundError and no plan can run.
+        matplotlib
 
 WORKDIR /qserver
 
