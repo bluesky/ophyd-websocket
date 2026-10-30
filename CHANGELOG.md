@@ -54,6 +54,22 @@ Queue Server API-key auth (`feat/staging-auth`).
 - `useOphydPVSocket` and `useOphydDeviceSocket` take an `apiKey` option and
   return `permissions` and `authError`.
 - README "Authentication" section, and `src/tests/test_auth.py`.
+- `docker-compose-auth.yml`: the simulated stack with `OAS_AUTH_ENABLED=true`,
+  plus Redis, a Queue Server RE Manager and the Bluesky HTTP server on the
+  private network. None of the three publish ports.
+- `qserver/`: the image for those services and the HTTP server config
+  (`config.auth.yml`, moved from the repo root). It also holds a committed
+  **demo** database (`bluesky_httpserver.sqlite`) with operator and observer
+  users, their demo passwords (`demo-passwords.env`) and API keys
+  (`demo-api-keys.env`). `generate_auth_db.sh` regenerates the database and
+  keys. The HTTP server works on a copy of the database, so the committed
+  file never changes.
+- Test frontend: an "API key" panel that saves a key to localStorage, offers
+  demo-key buttons under `docker-compose-auth.yml`, and shows the key's
+  permissions. Set controls are disabled unless the key can write.
+- Test frontend: local, finch-style `useOphydPVSocket`, `useOphydDeviceSocket`
+  and `useImageSocket` hooks that send the API key. They replace finch's hooks
+  and its `CameraCanvas`/`TIFFCanvas` until finch supports auth.
 
 ### Changed
 - Keys and auth messages are never logged. Logs show an 8-character sha256

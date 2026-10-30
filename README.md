@@ -450,6 +450,8 @@ OAS_AUTH_ENABLED=true OAS_AUTH_QSERVER_URL=http://qserver-api:60610 ophyd-websoc
 | `OAS_AUTH_READ_CACHE_SECONDS` | `10` | How long a successful read check is reused. |
 | `OAS_ALLOWED_ORIGINS` | unset | When set, browsers whose `Origin` isn't listed are refused on every socket. |
 
+**Try it locally:** `docker compose -f docker-compose-auth.yml up --build` runs the simulated beamline with auth on, behind a Queue Server and HTTP server. It uses demo `operator` and `observer` keys, which the test frontend offers as one-click buttons. See [DEVELOPMENT.md](DEVELOPMENT.md#with-authentication-docker-compose-authyml).
+
 ### What each key can do
 Permissions come from the key's **effective scopes** as reported by the Queue Server, not from role names. A role called "operator" whose key was issued with restricted scopes only gets those scopes. Out of the box:
 
@@ -511,7 +513,7 @@ Neither keys nor auth messages are ever logged; logs show an 8-character sha256 
 - **Write controls:** use `permissions.write`, or `GET /api/v1/auth/permissions`, to disable them for observers. The server enforces this regardless of the UI.
 - **Reference code:** [react_examples/useOphydPVSocket.tsx](react_examples/useOphydPVSocket.tsx) and [useOphydDeviceSocket.tsx](react_examples/useOphydDeviceSocket.tsx) show the pattern with an `apiKey` option.
 
-> The hooks in the published `@blueskyproject/finch` package (0.1.x) don't send an auth message yet. Leave `OAS_AUTH_ENABLED` off for Finch UIs until Finch is updated.
+> The hooks in the published `@blueskyproject/finch` package (0.1.x) don't send an auth message yet. Leave `OAS_AUTH_ENABLED` off for Finch UIs until Finch is updated. The test frontend in `src/frontend` works around this with local, finch-style hooks (`src/frontend/src/lib/hooks/`), including camera and TIFF streams.
 
 ### Deployment notes
 - Serve over **HTTPS/WSS**. The key travels on every request and in the first socket message.

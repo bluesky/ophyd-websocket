@@ -27,6 +27,8 @@ export interface SignalCardProps {
   onRemove: (name: string) => void
   /** Hide the unsubscribe button for cards that are part of a fixed panel. */
   removable?: boolean
+  /** False when the API key lacks write permission. The server enforces it either way. */
+  canWrite?: boolean
 }
 
 /**
@@ -40,13 +42,14 @@ export default function SignalCard({
   onSet,
   onRemove,
   removable = true,
+  canWrite = true,
 }: SignalCardProps) {
   const [draft, setDraft] = useState('')
 
   const connected = signal?.connected ?? false
   // Composite devices report write_access as null (it is a per-signal notion),
   // so only an explicit `false` locks the input down.
-  const writable = signal != null && signal.write_access !== false
+  const writable = canWrite && signal != null && signal.write_access !== false
   const enumStrings = signal?.enum_strs ?? null
 
   // /pv-socket subscribes without string=True, so enum PVs arrive as their

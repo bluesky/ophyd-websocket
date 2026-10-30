@@ -60,7 +60,7 @@ real beamline. Three services:
 | `caproto-detector` | Simulated areaDetector serving `SIMDET1:*` PVs | `caproto/sim_detector_ioc.py` |
 | `caproto-tiff-detector` | Simulated TIFF-writer serving `SIMTIFF1:*` PVs | `caproto/sim_tiff_detector_ioc.py` |
 | `ophyd-websocket` | This server, with ophyd devices wrapping those PVs | `startup/` |
-| `frontend` | Minimal React/Tailwind SPA driven by the finch hooks | `src/frontend/` |
+| `frontend` | Minimal React/Tailwind SPA with finch-style socket hooks | `src/frontend/` |
 
 ```bash
 docker compose up --build
@@ -70,6 +70,82 @@ open http://localhost:5173
 Ports: frontend `5173`, ophyd-websocket `8001`, IOC Channel Access `5064`.
 `caproto-detector` is reachable only from inside the compose network — Channel
 Access is port-sensitive and `caproto-ioc` already owns 5064 on the host.
+
+## With authentication (`docker-compose-auth.yml`)
+
+The same stack with `OAS_AUTH_ENABLED=true`, plus a Bluesky Queue Server that
+validates API keys:
+
+```bash
+docker compose down                      # same container names and ports
+docker compose -f docker-compose-auth.yml up --build
+open http://localhost:5173               # then click "Demo operator" or "Demo observer"
+```
+
+| Service | What it is |
+| --- | --- |
+| `redis` | Queue storage for the RE Manager |
+| `qserver` | RE Manager running the queue server's built-in simulated profile (`ophyd.sim`) |
+| `qserver-http` | Bluesky HTTP server; users and roles from `qserver/config.auth.yml` |
+
+The other services come from `docker-compose.yml` through `extends`. None of the
+three new services publish ports: the browser only talks to ophyd-websocket,
+which reaches `qserver-http:60610` over the compose network.
+
+**Users and keys.** `qserver/config.auth.yml` defines two users. `operator` has
+full control, including `write:queue:control`. `observer` is read-only. Their
+passwords are in `qserver/demo-passwords.env`. API keys are minted once and
+stored, sha256-hashed, in the committed `qserver/bluesky_httpserver.sqlite`. The
+plaintext keys are in `qserver/demo-api-keys.env`:
+
+| Variable | Key | Used by |
+| --- | --- | --- |
+| `VITE_DEMO_OPERATOR_API_KEY` | operator | the frontend's "Demo operator" button |
+| `VITE_DEMO_OBSERVER_API_KEY` | observer | the frontend's "Demo observer" button |
+| `QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY` | observer | ophyd-websocket's own queue-safety `/api/status` check |
+
+The last key is needed because the HTTP server ignores single-user keys once
+users are configured. Without a minted key, the safety check would fail and
+every write would be refused.
+
+> These are **demo credentials, committed on purpose**. Never reuse the
+> passwords, keys or database outside this stack.
+
+`qserver-http` copies the seed database to `/data` inside the container at
+every start, so the committed file is never modified and every `up` starts
+from the same keys.
+
+**Regenerating the database and keys** (e.g. after bumping the pinned
+`bluesky-httpserver` in `qserver/Dockerfile`, or changing users in
+`config.auth.yml`):
+
+```bash
+./qserver/generate_auth_db.sh
+```
+
+It builds the qserver image and runs `qserver/generate_auth_db.py` inside it.
+The script starts the HTTP server on an empty database, logs in as each user,
+and mints never-expiring keys with `"scopes": ["inherit"]`. It checks each key
+with `GET /api/auth/scopes`, then writes `bluesky_httpserver.sqlite` and
+`demo-api-keys.env` into `qserver/`. Every run mints new keys and invalidates
+the old ones, so commit the two files together.
+
+To mint a key by hand inside the running stack:
+
+```bash
+docker compose -f docker-compose-auth.yml exec qserver-http python -c "
+import json, urllib.request, urllib.parse
+B = 'http://localhost:60610/api/auth'
+tok = json.load(urllib.request.urlopen(B + '/provider/local/token',
+    urllib.parse.urlencode({'username': 'observer', 'password': 'observer-demo-password'}).encode()))
+req = urllib.request.Request(B + '/apikey', method='POST',
+    data=json.dumps({'scopes': ['inherit'], 'expires_in': None, 'note': 'manual'}).encode(),
+    headers={'Authorization': 'Bearer ' + tok['access_token'], 'Content-Type': 'application/json'})
+print(json.load(urllib.request.urlopen(req))['secret'])"
+```
+
+Keys minted this way live only in the container's `/data` copy and disappear on
+the next restart.
 
 
 # Running each service natively (no docker)
@@ -218,33 +294,50 @@ Because the directory is bind-mounted, editing it and calling
 
 ## The frontend
 
-`src/frontend/` is a Vite + React + Tailwind v4 single-page app. It uses two
-finch hooks:
+`src/frontend/` is a Vite + React + Tailwind v4 single-page app. The published
+finch hooks and canvases (0.1.x) can't send an API key yet, so the app uses
+local, finch-style stand-ins in `src/lib/hooks/`. They take the same arguments
+plus an `apiKey` option. Swap them back for finch's once finch supports auth.
 
 - `useOphydDeviceSocket` — registry devices over `/api/v1/device-socket`. The
   sidebar lists whatever `GET /api/v1/devices` returns; click to subscribe.
 - `useOphydPVSocket` — arbitrary PV names over `/api/v1/pv-socket`. Type any PV
   into the sidebar form.
+- `useImageSocket` (rendered by `components/ImageStreamCanvas.tsx`) — the
+  camera and TIFF JPEG streams, replacing finch's `CameraCanvas` and
+  `TIFFCanvas`.
 
-The camera section on top renders finch's `CameraCanvas` pointed at the
-`SIMDET1` prefix. The canvas opens its own `/api/v1/camera-socket` connection
-and negotiates the frame geometry from `SIMDET1:cam1:{MinX,MinY,SizeX,SizeY,
-ColorMode,DataType}`, so the only prop it needs is the prefix. Alongside it,
-plain PV cards drive `SimMode`, `ColorMode`, `Acquire` and `AcquirePeriod` —
-changing any of them updates the live image.
+With a key, each hook sends `{"action": "auth", "api_key": ...}` first and
+subscribes or sends its init message only after the server accepts it. Without
+a key it behaves exactly like finch's hooks.
 
-Below the camera, the TIFF section renders finch's `TIFFCanvas` pointed at the
-`SIMTIFF1` prefix. The canvas opens its own `/api/v1/tiff-socket` connection,
-sends `{ prefix }`, and the server watches `SIMTIFF1:TIFF1:FullFileName_RBV` —
-so as the TIFF IOC cycles files, the viewer updates. Read-only file-writer
+**API key.** The sidebar's "API key" panel saves a key to `localStorage`
+(`src/lib/apiKey.ts`). Every hook reads it through `useApiKey()`, so saving or
+clearing a key reconnects every socket at once. The panel also shows what the
+key may do, from `GET /api/v1/auth/permissions`, and set controls are disabled
+unless that reports `write`. The "Demo operator" and "Demo observer" buttons
+appear only when `VITE_DEMO_*_API_KEY` are set, which `docker-compose-auth.yml`
+does. With auth off on the server, the panel says so and everything is
+writable.
+
+The camera section on top streams `/api/v1/camera-socket` for the `SIMDET1`
+prefix. It sends the same init message finch's `CameraCanvas` does, and the
+server negotiates the frame geometry from `SIMDET1:cam1:{MinX,MinY,SizeX,SizeY,
+ColorMode,DataType}`. Alongside it, plain PV cards drive `SimMode`,
+`ColorMode`, `Acquire` and `AcquirePeriod`; changing any of them updates the
+live image.
+
+Below the camera, the TIFF section streams `/api/v1/tiff-socket`, sending
+`{ prefix: 'SIMTIFF1' }`. The server watches `SIMTIFF1:TIFF1:FullFileName_RBV`,
+so the viewer updates as the TIFF IOC cycles files. Read-only file-writer
 status PVs sit alongside it.
 
 Both render through one `SignalCard`, which shows the live value, units,
 control limits, connection state, and a setpoint control (a text input, or
 buttons when the signal has `enum_strs`).
 
-The socket URLs are derived from `ophydApiUrl` on finch's `FinchConfigProvider`,
-which reads `VITE_OPHYD_API_URL` and otherwise falls back to
+The socket URLs are derived from `ophydApiUrl` (`src/lib/config.ts`), which
+reads `VITE_OPHYD_API_URL` and otherwise falls back to
 `http://<current-host>:8001/api/v1`. Note this URL is resolved in the *browser*,
 so it points at the host-published port rather than a docker service name.
 

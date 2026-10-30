@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import { ophydApiUrl } from '../lib/config'
+import type { AuthStatus } from '../lib/useAuthPermissions'
+import ApiKeyPanel from './ApiKeyPanel'
 
 export interface SidebarProps {
+  apiKey: string | null
+  authStatus: AuthStatus
   registryDevices: string[]
   registryError: string | null
   registryLoading: boolean
@@ -13,8 +17,10 @@ export interface SidebarProps {
   onAddPv: (pv: string) => void
 }
 
-/** Registry browser plus the arbitrary-PV subscription form. */
+/** API key settings, registry browser and the arbitrary-PV subscription form. */
 export default function Sidebar({
+  apiKey,
+  authStatus,
   registryDevices,
   registryError,
   registryLoading,
@@ -29,6 +35,8 @@ export default function Sidebar({
 
   return (
     <aside className="flex w-80 shrink-0 flex-col gap-6 overflow-y-auto border-r border-slate-200 bg-white p-4">
+      <ApiKeyPanel apiKey={apiKey} authStatus={authStatus} />
+
       <section>
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">

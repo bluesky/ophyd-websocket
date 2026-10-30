@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { authHeaders } from './apiKey'
 import { ophydApiUrl } from './config'
 
 interface DevicesResponse {
@@ -7,8 +8,11 @@ interface DevicesResponse {
   message: string
 }
 
-/** Polls the ophyd-websocket REST API for the names in its device registry. */
-export function useDeviceRegistry() {
+/**
+ * Polls the ophyd-websocket REST API for the names in its device registry,
+ * sending `apiKey` when set and re-fetching whenever it changes.
+ */
+export function useDeviceRegistry(apiKey: string | null) {
   const [devices, setDevices] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -16,7 +20,7 @@ export function useDeviceRegistry() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const response = await fetch(`${ophydApiUrl}/devices`)
+      const response = await fetch(`${ophydApiUrl}/devices`, { headers: authHeaders(apiKey) })
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
       const body: DevicesResponse = await response.json()
       setDevices(body.devices ?? [])
@@ -27,7 +31,7 @@ export function useDeviceRegistry() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [apiKey])
 
   useEffect(() => {
     void refresh()
