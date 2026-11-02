@@ -431,6 +431,8 @@ sequenceDiagram
 # Authentication
 ophyd-websocket can require the **same API keys you already use for the Bluesky Queue Server HTTP server**. It has no users or keys of its own: for each key it calls the Queue Server's `GET /api/auth/scopes` and enforces what the key is allowed to do. One key works for both servers, so there's no second login.
 
+For diagrams of how keys are checked, the socket lifecycle and the write path, see [How authentication works](https://github.com/bluesky/ophyd-websocket/blob/main/docs/authentication.md).
+
 Auth is **off by default**. When it's off, the server logs a warning at startup and anyone who can reach it can read and write. Turn it on with:
 
 ```bash

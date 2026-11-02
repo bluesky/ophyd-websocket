@@ -82,6 +82,55 @@ docker compose -f docker-compose-auth.yml up --build
 open http://localhost:5173               # then click "Demo operator" or "Demo observer"
 ```
 
+```mermaid
+flowchart LR
+    browser["Your machine<br/>browser, caget / caput"]
+
+    subgraph files["Committed demo files (qserver/)"]
+        keys["demo-api-keys.env"]
+        pw["demo-passwords.env"]
+        db[("bluesky_httpserver.sqlite")]
+    end
+
+    subgraph net["docker network: beamline"]
+        fe["frontend<br/>Vite :5173"]
+        ows["ophyd-websocket :8001<br/>OAS_AUTH_ENABLED=true"]
+        ioc["caproto-ioc<br/>SIM:*"]
+        det["caproto-detector<br/>SIMDET1:*"]
+        tiff["caproto-tiff-detector<br/>SIMTIFF1:*"]
+        qhttp["qserver-http :60610"]
+        qs["qserver<br/>RE Manager :60615 / :60625"]
+        redis[("redis :6379")]
+    end
+
+    browser -- "loads the app<br/>localhost:5173" --> fe
+    browser -- "REST + WebSockets<br/>localhost:8001" --> ows
+    browser -. "caget / caput<br/>localhost:5064" .-> ioc
+
+    ows -- "Channel Access" --> ioc & det & tiff
+    ows -- "key checks + queue status" --> qhttp
+    ows -- "console output" --> qs
+    qhttp -- "0MQ" --> qs
+    qs --> redis
+
+    keys -- "VITE_DEMO_* keys" --> fe
+    keys -- "own key for /api/status" --> ows
+    pw --> qhttp
+    db -- "copied to /data at start" --> qhttp
+
+    classDef extended fill:#eef4ff,stroke:#5b7bd5
+    classDef authonly fill:#fff4e5,stroke:#d58a2b
+    class fe,ows,ioc,det,tiff extended
+    class qhttp,qs,redis authonly
+```
+
+Blue services come from `docker-compose.yml` through `extends`; orange ones
+exist only in `docker-compose-auth.yml`. Only `:5173`, `:8001` and `:5064` are
+published to your machine. The browser's REST and WebSocket traffic goes
+straight to ophyd-websocket on `:8001`, not through the frontend container.
+How keys are checked is explained in
+[docs/authentication.md](docs/authentication.md).
+
 | Service | What it is |
 | --- | --- |
 | `redis` | Queue storage for the RE Manager |
