@@ -1,0 +1,111 @@
+# docker-compose.yml with authentication turned on:
+#
+#   docker compose -f docker-compose-auth.yml up --build
+#   open http://localhost:5173, then pick a demo key under "API key"
+#
+# Same IOCs and frontend as docker-compose.yml, plus a Bluesky Queue Server
+# whose HTTP server validates API keys for ophyd-websocket
+# (OAS_AUTH_ENABLED=true):
+#
+#   redis        -- queue storage for the RE Manager
+#   qserver      -- RE Manager (built-in simulated profile)
+#   qserver-http -- Bluesky HTTP server; users/keys from config.auth.yml and the
+#                   committed DEMO database qserver/bluesky_httpserver.sqlite
+#
+# None of the three publish ports: the browser only ever talks to
+# ophyd-websocket, which reaches qserver-http over the private network.
+#
+# The keys in qserver/demo-api-keys.env and the passwords in
+# qserver/demo-passwords.env are DEMO credentials, committed on purpose. Never
+# use them, or this database, in production. Regenerate them with
+# qserver/generate_auth_db.sh.
+#
+# Stop the docker-compose.yml stack first: the shared services reuse its
+# container names and host ports.
+
+services:
+  caproto-ioc:
+    extends:
+      file: docker-compose.yml
+      service: caproto-ioc
+
+  caproto-detector:
+    extends:
+      file: docker-compose.yml
+      service: caproto-detector
+
+  caproto-tiff-detector:
+    extends:
+      file: docker-compose.yml
+      service: caproto-tiff-detector
+
+  redis:
+    image: redis:7-alpine
+    container_name: qserver-redis
+    networks:
+      - beamline
+
+  qserver:
+    build:
+      context: ./qserver
+    container_name: qserver
+    depends_on:
+      - redis
+    command: ["start-re-manager", "--redis-addr", "redis:6379", "--zmq-publish-console", "ON"]
+    networks:
+      - beamline
+
+  qserver-http:
+    build:
+      context: ./qserver
+    container_name: qserver-http
+    depends_on:
+      - qserver
+    command: ["/qserver/entrypoint-http.sh"]
+    env_file:
+      - qserver/demo-passwords.env
+    environment:
+      QSERVER_ZMQ_HOST: qserver
+    volumes:
+      # Copied to /data at start, so the committed seed is never modified.
+      - ./qserver/bluesky_httpserver.sqlite:/seed/bluesky_httpserver.sqlite:ro
+    networks:
+      - beamline
+
+  ophyd-websocket:
+    extends:
+      file: docker-compose.yml
+      service: ophyd-websocket
+    depends_on:
+      - caproto-ioc
+      - caproto-detector
+      - caproto-tiff-detector
+      - qserver-http
+    env_file:
+      # QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY: ophyd-websocket's own observer
+      # key for the queue-safety /api/status check. The HTTP server ignores
+      # single-user keys once users are configured, so it must be a minted key.
+      - qserver/demo-api-keys.env
+    environment:
+      OAS_AUTH_ENABLED: "true"
+      OAS_AUTH_QSERVER_URL: "http://qserver-http:60610"
+      QSERVER_HTTP_SERVER_HOST: "qserver-http"
+      QSERVER_HTTP_SERVER_PORT: "60610"
+      # The Queue Server is part of this stack, so refuse writes when it
+      # can't be reached instead of letting them through.
+      OAS_REQUIRE_QSERVER: "true"
+      # /qs-console-socket subscribes to the RE Manager's console output.
+      ZMQ_HOST: "qserver"
+
+  frontend:
+    extends:
+      file: docker-compose.yml
+      service: frontend
+    env_file:
+      # VITE_DEMO_{OPERATOR,OBSERVER}_API_KEY become the settings panel's
+      # one-click demo key buttons. Only VITE_* variables reach the browser.
+      - qserver/demo-api-keys.env
+
+networks:
+  beamline:
+    driver: bridge

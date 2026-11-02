@@ -507,6 +507,74 @@ def test_camera_socket_subscribes_to_array_and_setting_pvs(client, camera_signal
             assert camera_signals[pv].subscriptions, f"{pv} was not subscribed"
 
 
+def wait_until(predicate, timeout=5.0):
+    """The endpoint tears down after the client leaves; give it a moment."""
+    import time
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def test_camera_socket_unsubscribes_everything_on_disconnect(client, camera_signals):
+    # Left subscribed, every page reload kept another set of CA callbacks
+    # feeding a queue nobody read, until the server ran out of memory.
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        ws.receive_json()
+        ws.receive_bytes()
+
+    signals = [camera_signals[ARRAY_PV]] + [camera_signals[pv] for pv in CAMERA_PV_VALUES]
+    assert wait_until(lambda: all(not s.subscriptions for s in signals)), [
+        s.pvname for s in signals if s.subscriptions
+    ]
+
+
+def test_camera_socket_reuses_signals_across_connections(client, monkeypatch):
+    # pyepics never frees a signal that opened a channel, so a fresh set per
+    # connection leaked ~10 signals per page reload, each still processing frames.
+    created = []
+
+    def factory(pv, name=None, **kwargs):
+        value = CAMERA_PV_VALUES.get(pv, list(range(64)))
+        signal = FakeSignalRO(pv, name=name, value=value)
+        created.append(signal)
+        return signal
+
+    monkeypatch.setattr(camera_socket, "EpicsSignalRO", factory)
+
+    for _ in range(3):
+        with client.websocket_connect("/api/v1/camera-socket") as ws:
+            ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+            ws.receive_json()
+            ws.receive_bytes()
+
+    assert len(created) == len({s.pvname for s in created})
+    assert wait_until(lambda: all(not s.subscriptions for s in created))
+
+
+def test_camera_socket_unsubscribes_settings_when_array_pv_fails(client, monkeypatch):
+    created = {}
+
+    def factory(pv, name=None, **kwargs):
+        if pv.endswith("ArrayData"):
+            signal = FakeSignalRO(pv, name=name, connected=False, value=[])
+        else:
+            signal = FakeSignalRO(pv, name=name, value=CAMERA_PV_VALUES.get(pv, 0))
+        created[pv] = signal
+        return signal
+
+    monkeypatch.setattr(camera_socket, "EpicsSignalRO", factory)
+
+    with client.websocket_connect("/api/v1/camera-socket") as ws:
+        ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})
+        assert "could not connect" in ws.receive_json()["error"]
+
+    assert wait_until(lambda: all(not created[pv].subscriptions for pv in CAMERA_PV_VALUES))
+
+
 def test_camera_socket_toggles_log_normalization(client, camera_signals):
     with client.websocket_connect("/api/v1/camera-socket") as ws:
         ws.send_json({"imageArray_PV": "MYDET:image1:ArrayData"})

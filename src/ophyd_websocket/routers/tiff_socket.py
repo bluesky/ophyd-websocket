@@ -15,6 +15,8 @@ from ophyd import EpicsSignalRO
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 #from fastapi.testclient import TestClient
 
+from ..auth import authenticate_websocket, is_auth_message, receive_non_auth_text
+
 logger = logging.getLogger(__name__)
 
 max_dimension = 2500 #maximum pixel width or height to be sent out. Increase if higher fidelity is needed
@@ -46,6 +48,22 @@ def convert_byte_array_to_string(byte_array):
 
 
 router = APIRouter()
+
+
+# One signal per PV for the life of the process. pyepics keeps every signal
+# that ever opened a channel reachable from its PV cache, so a new
+# EpicsSignalRO per worker was never freed and kept processing every update.
+# Callbacks are still added and removed per worker.
+_signals: dict[str, EpicsSignalRO] = {}
+
+
+def get_signal(pv: str, name: str) -> EpicsSignalRO:
+    signal = _signals.get(pv)
+    if signal is None:
+        signal = _signals[pv] = EpicsSignalRO(pv, name=name)
+    return signal
+
+
 _workers: dict[str, "SharedTiffWorker"] = {}
 _workers_lock = asyncio.Lock()
 
@@ -70,11 +88,12 @@ class SharedTiffWorker:
     pending_file_path: str | None = None
     last_file_path: str | None = None
     processing_task: asyncio.Task | None = None
+    stopped: bool = False
 
     async def start(self) -> tuple[bool, str | None]:
         try:
             logger.debug("About to call EpicsSignal for TIFF file path")
-            self.path_signal = EpicsSignalRO(self.file_path_pv, name='path_signal')
+            self.path_signal = get_signal(self.file_path_pv, name='path_signal')
             self.path_signal.get()
             logger.debug("Get call complete")
         except Exception as e:
@@ -106,11 +125,19 @@ class SharedTiffWorker:
         return True, None
 
     async def stop(self):
+        # Set before tearing down: a path_cb already queued via
+        # call_soon_threadsafe must not start a new decode on a dead worker.
+        self.stopped = True
+        self.pending_file_path = None
         if self.path_signal is not None and self.path_sub_id is not None:
             try:
-                self.path_signal.clear_sub(self.path_sub_id)
+                # unsubscribe() takes the id subscribe() returned; clear_sub()
+                # wants the callback and silently ignores an id, which left the
+                # worker decoding every new file forever after its last socket.
+                self.path_signal.unsubscribe(self.path_sub_id)
             except Exception:
-                pass
+                logger.exception("Error unsubscribing from %s", self.file_path_pv)
+            self.path_sub_id = None
 
         if self.processing_task is not None:
             self.processing_task.cancel()
@@ -122,6 +149,8 @@ class SharedTiffWorker:
             self.condition.notify_all()
 
     def _enqueue_file_path(self, file_path: str):
+        if self.stopped:
+            return
         self.pending_file_path = file_path
         self.last_file_path = file_path
         if self.processing_task is None or self.processing_task.done():
@@ -186,7 +215,12 @@ async def cleanup_worker_if_unused(worker: SharedTiffWorker):
 async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     await websocket.accept()
 
-    file_path_pv = await initialize_settings(websocket)
+    # Before the worker exists: no key, no PV subscriptions or file reads.
+    session = await authenticate_websocket(websocket, "read")
+    if session is None:
+        return
+
+    file_path_pv = await initialize_settings(websocket, session)
     if file_path_pv is None:
         return
 
@@ -219,6 +253,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
+            if is_auth_message(data):
+                await session.handle_auth_message(websocket, data)
+                continue
             if "toggleLogNormalization" in data:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])
                 logger.info("TIFF socket log normalization toggled to: %s", worker.use_log_normalization)
@@ -230,25 +267,29 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
     receiver_task = asyncio.create_task(receiver_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {sender_task, receiver_task},
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
+        async with session.guard(websocket):
+            done, _ = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
         for task in done:
             exc = task.exception()
             if exc is None:
                 continue
             if isinstance(exc, WebSocketDisconnect):
                 break
-            await websocket.send_text(json.dumps({'error': str(exc)}))
+            # The peer is usually gone already (e.g. a page reload).
+            with contextlib.suppress(Exception):
+                await websocket.send_text(json.dumps({'error': str(exc)}))
             break
-        for task in pending:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
     except WebSocketDisconnect:
         pass
     finally:
+        # In finally so a failed send above can't leave a loop running.
+        for task in (sender_task, receiver_task):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         worker.sockets.discard(websocket)
         with contextlib.suppress(Exception):
             await websocket.close()
@@ -256,9 +297,9 @@ async def websocket_endpoint(websocket: WebSocket, num: int | None = None):
 
 # Setup and initialization functions
 
-async def initialize_settings(websocket):
+async def initialize_settings(websocket, session=None):
     try:
-        data = await websocket.receive_text()
+        data = await receive_non_auth_text(websocket, session)
         message = json.loads(data)
 
         # Get prefix from user or use default

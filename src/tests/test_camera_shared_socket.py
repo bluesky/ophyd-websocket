@@ -241,9 +241,19 @@ async def test_worker_stop_clears_all_subscriptions(shared_signals):
 
     await worker.stop()
 
-    assert shared_signals[ARRAY_PV].cleared_subs
+    assert shared_signals[ARRAY_PV].subscriptions == {}
     for pv in PV_VALUES:
-        assert shared_signals[pv].cleared_subs, f"{pv} subscription was not cleared"
+        assert shared_signals[pv].subscriptions == {}, f"{pv} subscription was not cleared"
+
+
+async def test_stopped_worker_ignores_late_frames(shared_signals):
+    worker, _ = await shared.get_or_create_worker(ARRAY_PV, SETTINGS_LIST)
+    await worker.stop()
+
+    worker._enqueue_latest_raw_frame(list(range(64)))
+
+    assert worker.pending_raw_frame is None
+    assert worker.processing_task is None
 
 
 async def test_cleanup_removes_unused_worker(shared_signals):

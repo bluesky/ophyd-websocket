@@ -1,0 +1,130 @@
+# bluesky-httpserver configuration with multi-user authentication
+# https://blueskyproject.io/bluesky-httpserver/configuration.html
+#
+# Users, roles and database-backed API keys, so that clients can be given
+# different permissions.
+#
+# In this repo it is served by the qserver-http service in
+# docker-compose-auth.yml, with DEMO passwords from qserver/demo-passwords.env
+# and the pre-built DEMO database qserver/bluesky_httpserver.sqlite, whose
+# plaintext keys are in qserver/demo-api-keys.env. Regenerate the database and
+# keys with qserver/generate_auth_db.sh.
+#
+# Why users instead of a single master key: the server only honors
+# single_user_api_key (QSERVER_HTTP_SERVER_SINGLE_USER_API_KEY) when NO
+# authentication providers are configured. Once a provider exists, every API key
+# is minted by the server, stored hashed in the database, and bound to a user;
+# the key's permissions are the intersection of the scopes it was created with
+# and that user's role scopes. So the permission tiers live on the users:
+#
+#   operator  -- full control, equivalent to the old single-user key.
+#   observer  -- read-only: status, queue, history, plans/devices, console.
+#                Cannot add/edit/delete queue items, start/stop/pause plans,
+#                open/close the environment, or edit history.
+#
+# Required environment variables:
+#
+#   QSERVER_ZMQ_HOST            -- RE Manager host (see config.yml).
+#   QSERVER_OPERATOR_PASSWORD   -- password for the 'operator' user.
+#   QSERVER_OBSERVER_PASSWORD   -- password for the 'observer' user.
+#
+# WARNING: the config loader uses os.path.expandvars, which leaves an UNSET
+# variable as the literal text "${NAME}". An unset password therefore becomes
+# the guessable password "${QSERVER_OPERATOR_PASSWORD}". Always check that both
+# are set before starting the server.
+#
+# Recommended environment variables (read by the server directly, deliberately
+# not set here so an unset value falls back to a safe default instead of a
+# literal string):
+#
+#   QSERVER_HTTP_SERVER_SERVER_SECRET_KEYS -- signs login tokens. Defaults to a
+#       random value per start, which only means logins (not API keys) are
+#       invalidated on restart. Generate with `openssl rand -hex 32`.
+#   QSERVER_HTTP_SERVER_DATABASE_URI -- where users/API keys are stored.
+#       Defaults to sqlite:///./bluesky_httpserver.sqlite in the working
+#       directory. In docker, point this at a mounted volume, e.g.
+#       sqlite:////data/bluesky_httpserver.sqlite, or every container rebuild
+#       deletes all issued API keys. The schema is created on first start.
+#
+# Getting API keys (the 'master' key and the read-only key):
+#
+#   1. Log in as a user to get a short-lived access token:
+#        curl -X POST http://localhost:60610/api/auth/provider/local/token \
+#             -d username=observer -d "password=$QSERVER_OBSERVER_PASSWORD"
+#   2. Use the access_token to mint a long-lived API key for that user:
+#        curl -X POST http://localhost:60610/api/auth/apikey \
+#             -H "Authorization: Bearer <access_token>" \
+#             -H "Content-Type: application/json" \
+#             -d '{"scopes": ["inherit"], "expires_in": null, "note": "read-only web client"}'
+#      The response's "secret" is the API key; it is shown only once. Repeat as
+#      'operator' for the master key. "expires_in" is required: null never
+#      expires, or give a lifetime in seconds.
+#   3. Clients send it as:  Authorization: ApiKey <secret>
+#
+#   A key minted as 'observer' can never exceed observer permissions, even
+#   with "inherit". Keys are revoked with DELETE /api/auth/apikey?first_eight=<...>.
+
+qserver_zmq_configuration:
+  # REQ-REP control channel: queue operations, plan submission, RE control.
+  control_address: tcp://${QSERVER_ZMQ_HOST}:60615
+  # PUB-SUB channel carrying console output, enabled on the manager with
+  # `start-re-manager --zmq-publish-console ON`.
+  info_address: tcp://${QSERVER_ZMQ_HOST}:60625
+
+allow_origins:
+  - http://localhost:8081
+  - http://localhost:5173
+  - http://localhost:5174
+
+authentication:
+  providers:
+    # 'local' appears in the login URL: /api/auth/provider/local/token
+    - provider: local
+      authenticator: bluesky_httpserver.authenticators:DictionaryAuthenticator
+      args:
+        users_to_passwords:
+          operator: ${QSERVER_OPERATOR_PASSWORD}
+          observer: ${QSERVER_OBSERVER_PASSWORD}
+  # Requests with no credentials are rejected outright.
+  allow_anonymous_access: false
+
+api_access:
+  policy: bluesky_httpserver.authorization:DictionaryAPIAccessControl
+  args:
+    roles:
+      # The built-in 'expert' role lacks the two scopes below that the old
+      # single-user key had; add them so 'operator' loses nothing.
+      expert:
+        scopes_add:
+          - write:manager:stop
+          - write:testing
+      # The built-in 'observer' role is already read-only (read:* plus
+      # user:apikeys, which only lets it mint more read-only keys). Spelled out
+      # here so the permission set is visible and can't drift with upstream
+      # defaults.
+      observer:
+        scopes_set:
+          - read:status
+          - read:queue
+          - read:history
+          - read:resources
+          - read:config
+          - read:monitor
+          - read:console
+          - read:lock
+          - read:testing
+          - user:apikeys
+    users:
+      operator:
+        # 'admin' adds API key management for other users and principal listing.
+        roles:
+          - admin
+          - expert
+      observer:
+        roles: observer
+
+# Which plans and devices each user may see/run; the default lets every user
+# use everything the queue server allows, and the observer's lack of write
+# scopes already prevents it from submitting anything.
+resource_access:
+  policy: bluesky_httpserver.authorization:DefaultResourceAccessControl

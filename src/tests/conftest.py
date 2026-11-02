@@ -51,18 +51,46 @@ def event_loop():
 def _isolate_module_state():
     """Reset the module-level state the routers keep between requests.
 
-    ``core_api.pv_dict`` and the camera/TIFF shared-worker registries are
-    process globals; leaking them across tests makes ordering matter.
+    ``core_api.pv_dict``, the camera/TIFF shared-worker registries and the
+    image sockets' per-PV signal caches are process globals; leaking them
+    across tests makes ordering matter (and would hand one test's fake
+    signals to the next).
     """
-    from ophyd_websocket.routers import camera_shared_socket, core_api, tiff_socket
+    from ophyd_websocket.routers import camera_shared_socket, camera_socket, core_api, tiff_socket
 
-    core_api.pv_dict.clear()
-    camera_shared_socket._workers.clear()
-    tiff_socket._workers.clear()
+    def reset():
+        core_api.pv_dict.clear()
+        camera_shared_socket._workers.clear()
+        tiff_socket._workers.clear()
+        for module in (camera_socket, camera_shared_socket, tiff_socket):
+            module._signals.clear()
+
+    reset()
     yield
-    core_api.pv_dict.clear()
-    camera_shared_socket._workers.clear()
-    tiff_socket._workers.clear()
+    reset()
+
+
+@pytest.fixture(autouse=True)
+def _auth_disabled_and_queue_idle(monkeypatch):
+    """Default test world: auth off, and the queue-safety interlock on
+    WebSocket writes passes.
+
+    Without the stub a WebSocket ``set`` would query whatever Queue Server
+    happens to be running on this machine. Tests of auth or of the WS
+    interlock opt back in (see ``auth_enabled`` and ``test_auth.py``).
+    """
+    from ophyd_websocket import auth
+
+    monkeypatch.delenv("OAS_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("OAS_ALLOWED_ORIGINS", raising=False)
+    auth.clear_cache()
+
+    async def _idle():
+        return None
+
+    monkeypatch.setattr(auth, "ws_queue_safety_check", _idle)
+    yield
+    auth.clear_cache()
 
 
 @pytest.fixture

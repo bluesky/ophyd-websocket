@@ -79,6 +79,14 @@ services:
       EPICS_CA_MAX_ARRAY_BYTES: "10000000"
       SIM_PV_PREFIX: "SIM:"
       SIM_DETECTOR_PV_PREFIX: "SIMDET1:"
+      # glibc keeps freed memory in per-thread arenas, and its adaptive mmap
+      # threshold rises after the first large free, so the multi-MB arrays the
+      # image sockets decode on worker threads end up retained. Measured on
+      # colima (2 GiB VM, emulated amd64): RSS after 20 page reloads went from
+      # ~830 MB to ~330 MB with these set. Large buffers now go straight back
+      # to the OS.
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
     volumes:
       # Live-editable ophyd device definitions.
       - ./startup:/startup:ro

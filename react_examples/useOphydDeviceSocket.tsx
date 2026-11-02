@@ -10,14 +10,27 @@ import {
 
 type SubscribeAction = 'subscribe' | 'subscribeSafely' | 'subscribeReadOnly';
 
+/** What the server says this socket's API key may do (see README "Authentication"). */
+export interface OphydSocketPermissions {
+    read: boolean;
+    write: boolean;
+    console: boolean;
+}
+
 interface UseOphydDeviceSocketOptions {
     wsUrl?: string;
+    /**
+     * Queue Server API key -- the same `qServerApiKey` Finch already sends to the
+     * Queue Server. Sent as the socket's first message; subscriptions go out only
+     * after the server accepts it. Re-sent on every (re)connect.
+     */
+    apiKey?: string;
     subscribeAction?: SubscribeAction;
 }
 
 export default function useOphydDeviceSocket(
     deviceNameList: string[],
-    { wsUrl, subscribeAction = 'subscribe' }: UseOphydDeviceSocketOptions = {},
+    { wsUrl, apiKey, subscribeAction = 'subscribe' }: UseOphydDeviceSocketOptions = {},
 ) {
     const configWsUrl = useOphydApiUrls().getWsUrl('device-socket');
     const apiUrl: string = wsUrl ?? configWsUrl;
@@ -41,6 +54,8 @@ export default function useOphydDeviceSocket(
     // eslint-disable-next-line react-hooks/exhaustive-deps
     const memoizedDeviceNames = useMemo(() => deviceNameList, [JSON.stringify(deviceNameList)]); //device updates can retrigger the hook if inputs aren't memoized
     const wsRef = useRef<WebSocket | null>(null);
+    const [permissions, setPermissions] = useState<OphydSocketPermissions | null>(null);
+    const [authError, setAuthError] = useState<string | null>(null);
     const hasRenderedOnlyOnce = useRef(false);
 
     /**
@@ -131,20 +146,45 @@ export default function useOphydDeviceSocket(
         const ws = new WebSocket(apiUrl);
         wsRef.current = ws;
 
-        // Open WebSocket connection and subscribe to devices
-        ws.onopen = () => {
-            console.log('WebSocket connection opened');
+        // Per connection, so a reconnect re-authenticates and resubscribes.
+        let subscribed = false;
+        const subscribe = () => {
+            if (subscribed) return;
+            subscribed = true;
             ws.send(JSON.stringify({ action: subscribeAction, devices: memoizedDeviceNames }));
+        };
+
+        // Open WebSocket connection. With an API key, authenticate first and
+        // subscribe only once the server accepts it (see onmessage).
+        ws.onopen = () => {
+            if (apiKey) {
+                ws.send(JSON.stringify({ action: 'auth', api_key: apiKey }));
+            } else {
+                subscribe();
+            }
         };
 
         // Handle incoming WebSocket messages
         ws.onmessage = (event) => {
             try {
+                const parsed = JSON.parse(event.data);
+                if (parsed.action === 'auth') {
+                    if (parsed.ok) {
+                        setPermissions(parsed.permissions);
+                        setAuthError(null);
+                        subscribe(); // no-op on a later re-auth ack
+                    } else {
+                        // The server closes the socket after a failed or revoked auth.
+                        setPermissions(null);
+                        setAuthError(parsed.error);
+                    }
+                    return;
+                }
                 const message:
                     | MessageResponse
                     | ErrorResponse
                     | ValueUpdateResponse
-                    | MetaUpdateResponse = JSON.parse(event.data);
+                    | MetaUpdateResponse = parsed;
 
                 if ('sub_type' in message && message.sub_type === 'meta') {
                     //meta updates occur when we first subscribe to a device, or if the connection changes (lost or regained EPICS connection)
@@ -195,12 +235,15 @@ export default function useOphydDeviceSocket(
                 wsRef.current = null;
             }
         };
-    }, [wsUrl, memoizedDeviceNames, apiUrl, subscribeAction]);
+    }, [wsUrl, memoizedDeviceNames, apiUrl, subscribeAction, apiKey]);
 
     return {
         devices,
         toggleDeviceLock,
         handleSetValueRequest,
         toggleExpand,
+        /** `null` until authenticated (or when no apiKey is given). Hide write controls when `!permissions?.write`; the server enforces it either way. */
+        permissions,
+        authError,
     };
 }

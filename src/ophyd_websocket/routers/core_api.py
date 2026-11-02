@@ -1,13 +1,14 @@
 from typing import Union
 import logging
 
-from fastapi import APIRouter, Response, status, WebSocket
+from fastapi import APIRouter, Depends, Response, status, WebSocket
 from pydantic import BaseModel
 from ophyd import EpicsSignal
 
 # Import queue server utilities
 from ophyd_websocket.device_registry import device_registry
 from ophyd_websocket.queue_safety import queue_safety_required, get_queue_server_status
+from ophyd_websocket.auth import Principal, authenticate_websocket, require_read, require_write
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ class OphydDeviceInstruction(BaseModel):
 
 router = APIRouter()
 
-@router.post("/load-devices", status_code=200, tags=["Ophyd Devices"])
+@router.post("/load-devices", status_code=200, dependencies=[Depends(require_write)], tags=["Ophyd Devices"])
 def load_devices_from_startup(response: Response):
     """
     Manually load devices from the startup directory
@@ -87,7 +88,7 @@ def load_devices_from_startup(response: Response):
             "startup_directory": startup_dir
         }
 
-@router.get("/devices", status_code=200, tags=["Ophyd Devices"])
+@router.get("/devices", status_code=200, dependencies=[Depends(require_read)], tags=["Ophyd Devices"])
 def list_devices():
     """
     List all devices in the device registry
@@ -109,7 +110,7 @@ def list_devices():
             "message": "No devices found in registry. Use --startup-dir to load devices from Python files."
         }
 
-@router.get("/devices/{device_name}", status_code=200, tags=["Ophyd Devices"])
+@router.get("/devices/{device_name}", status_code=200, dependencies=[Depends(require_read)], tags=["Ophyd Devices"])
 def get_device_info(device_name: str, response: Response):
     """
     Get detailed information about a specific device
@@ -123,7 +124,7 @@ def get_device_info(device_name: str, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"error": f"Device '{device_name}' not found in registry"}
 
-@router.get("/devices-info", status_code=200, tags=["Ophyd Devices"])  
+@router.get("/devices-info", status_code=200, dependencies=[Depends(require_read)], tags=["Ophyd Devices"])  
 def get_all_devices_info():
     """
     Get detailed information about all devices in the registry
@@ -135,7 +136,7 @@ def get_all_devices_info():
         "count": len(device_registry.list_devices())
     }
 
-@router.put("/devices", status_code=200, tags=["Ophyd Devices"])
+@router.put("/devices", status_code=200, dependencies=[Depends(require_write)], tags=["Ophyd Devices"])
 @queue_safety_required
 async def set_device_value(instruction: OphydDeviceInstruction, response: Response):
     """
@@ -219,7 +220,7 @@ async def set_device_value(instruction: OphydDeviceInstruction, response: Respon
             "value": instruction.set_value
         }
 
-@router.get("/queue-server/status", tags=["Queue Server"])
+@router.get("/queue-server/status", dependencies=[Depends(require_read)], tags=["Queue Server"])
 async def get_queue_server_status_endpoint():
     """
     Proxy GET request to queue server status endpoint
@@ -232,7 +233,7 @@ async def get_queue_server_status_endpoint():
     """
     return await get_queue_server_status()
 
-@router.get("/pvs", status_code=200, tags=["EPICS PVs"])
+@router.get("/pvs", status_code=200, dependencies=[Depends(require_read)], tags=["EPICS PVs"])
 def list_connected_pvs( response: Response):
     if len(pv_dict) > 0:
         # send a response including the names of all devices
@@ -243,7 +244,7 @@ def list_connected_pvs( response: Response):
     return {"404 Error": "No devices found"}
 
 
-@router.get("/pvs/{pv}", status_code=200, tags=["EPICS PVs"])
+@router.get("/pvs/{pv}", status_code=200, dependencies=[Depends(require_read)], tags=["EPICS PVs"])
 def read_pv_value(pv, response: Response):
     if pv in pv_dict:
         signal = pv_dict.get(pv)
@@ -252,7 +253,7 @@ def read_pv_value(pv, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"404 Error": "PV " + pv + " not found"}
 
-@router.post("/pvs/{pv}", status_code=201, tags=["EPICS PVs"])
+@router.post("/pvs/{pv}", status_code=201, dependencies=[Depends(require_read)], tags=["EPICS PVs"])
 def connect_to_pv(pv, response: Response):
     if pv in pv_dict:
         response.status_code = status.HTTP_409_CONFLICT # combine the response status code and the message in one line
@@ -272,7 +273,7 @@ def connect_to_pv(pv, response: Response):
         pv_dict[pv] = testSignal
         return {"201" : "PV " + pv + " is connected"}
     
-@router.put("/pvs", status_code=200, tags=["EPICS PVs"])
+@router.put("/pvs", status_code=200, dependencies=[Depends(require_write)], tags=["EPICS PVs"])
 @queue_safety_required
 async def set_pv_value(instruction: EpicsPVInstruction, response: Response):
     """
@@ -313,9 +314,24 @@ async def set_pv_value(instruction: EpicsPVInstruction, response: Response):
             return{"500 Error" : "Could not move device " + instruction.pv}
     
     
+@router.get("/auth/permissions", tags=["Auth"])
+async def get_auth_permissions(principal: Principal = Depends(require_read)):
+    """What the caller's API key may do here, so a UI can hide write controls.
+
+    The server enforces these on every request regardless; this is advisory.
+    """
+    return {
+        "authEnabled": principal.auth_enabled,
+        **principal.permissions(),
+        "roles": sorted(principal.roles),
+    }
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    if await authenticate_websocket(websocket, "read") is None:
+        return
     while True:
         data = await websocket.receive_text()
         await websocket.send_text(f"Message text was: {data}")

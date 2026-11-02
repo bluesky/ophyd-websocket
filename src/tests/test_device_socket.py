@@ -453,3 +453,72 @@ def test_set_reports_backend_failure(client, fake_registry):
         ws.receive_json()
         ws.send_json({"action": "set", "device": "m1", "value": 1})
         assert "drive fault" in ws.receive_json()["error"]
+
+
+class SlowStatus:
+    """A move that takes a while to report done, like a real motor."""
+
+    def __init__(self, seconds, error=None):
+        self.seconds = seconds
+        self.error = error
+        self.wait_calls = []
+
+    def wait(self, timeout=None):
+        import time
+        self.wait_calls.append(timeout)
+        time.sleep(self.seconds)
+        if self.error is not None:
+            raise self.error
+
+
+def test_set_does_not_block_the_socket_while_the_move_runs(client, fake_registry):
+    # set().wait() used to run on the event loop, freezing every socket for
+    # the whole move: readbacks arrived in one burst when it ended.
+    signal = FakeSignal("IOC:m1", name="m1")
+    status = SlowStatus(0.5)
+    signal.set = lambda value, **kwargs: status
+    fake_registry.add_device("m1", signal)
+
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "device": "m1"})
+        ws.receive_json()
+        ws.send_json({"action": "set", "device": "m1", "value": 4})
+        ws.send_json({"action": "refresh"})
+        # The refresh is answered while the move is still in progress...
+        assert ws.receive_json() == {"message": "Refreshed all devices"}
+        # ...and the outcome follows once it completes.
+        assert ws.receive_json() == {"message": "Successfully set m1 to 4"}
+
+
+def test_set_waits_for_completion_by_default(client, fake_registry):
+    # The old 1 s default reported any longer move as failed while the motor
+    # kept going.
+    signal = FakeSignal("IOC:m1", name="m1")
+    status = SlowStatus(0)
+    signal.set = lambda value, **kwargs: status
+    fake_registry.add_device("m1", signal)
+
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "device": "m1"})
+        ws.receive_json()
+        ws.send_json({"action": "set", "device": "m1", "value": 4})
+        ws.receive_json()
+
+    assert status.wait_calls == [None]
+
+
+def test_set_timeout_says_the_device_may_still_be_moving(client, fake_registry):
+    from ophyd.utils import WaitTimeoutError
+
+    signal = FakeSignal("IOC:m1", name="m1")
+    signal.set = lambda value, **kwargs: SlowStatus(0, error=WaitTimeoutError("not done"))
+    fake_registry.add_device("m1", signal)
+
+    with connect(client) as ws:
+        ws.send_json({"action": "subscribe", "device": "m1"})
+        ws.receive_json()
+        ws.send_json({"action": "set", "device": "m1", "value": 4, "timeout": 2})
+        error = ws.receive_json()["error"]
+
+    assert "within 2s" in error
+    assert "may still be moving" in error
