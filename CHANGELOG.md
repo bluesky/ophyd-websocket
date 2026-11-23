@@ -194,6 +194,13 @@ Merged from the `feat/ophyd-async` → `feat/h5-stream` → `feat/video-stream`
 - `SharedFileImageWorker` records the newest load error (`last_error`,
   `error_version`). Only the numeric socket sends it to clients.
 
+#### Fixed
+- HDF5 reads now run one at a time per process. With both `/h5-socket` and
+  `/h5-array-socket` open on one detector, the two workers opened the file at
+  the same moment on each `NumCaptured_RBV` update. h5py 3.16 / HDF5 2.0 then
+  returned frame 0's data to one of them, so one view stayed stuck on the
+  file's first frame.
+
 ## [0.1.0]
 
 First release.

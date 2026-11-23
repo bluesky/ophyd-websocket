@@ -22,6 +22,7 @@ os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 import asyncio
 import json
 import logging
+import threading
 
 import h5py
 import numpy as np
@@ -47,6 +48,12 @@ FRAME_COUNTER_SUFFIX = "NumCaptured_RBV"
 # finch's TIFFCanvas sends ``imageArray_PV: "<prefix>:image1:ArrayData"`` rather
 # than a bare prefix, so accept that too.
 FINCH_IMAGE_ARRAY_SUFFIX = ":image1:ArrayData"
+
+# One HDF5 read at a time in this process. Two threads opening the same file at
+# once (e.g. the JPEG and numeric workers for one detector, both woken by the
+# same NumCaptured_RBV update) can get another frame's data back: seen with
+# h5py 3.16 / HDF5 2.0 reading a file the detector holds open for SWMR writes.
+_h5_read_lock = threading.Lock()
 
 router = APIRouter()
 _registry = WorkerRegistry()
@@ -129,6 +136,11 @@ def read_latest_frame_if_new(file_path, dataset_path=None, last_key=None, force=
     same file, or a rewritten file, counts as new. Raises on any read failure.
     """
     wait_for_readable_file(file_path)
+    with _h5_read_lock:
+        return _read_latest_frame_if_new_locked(file_path, dataset_path, last_key, force)
+
+
+def _read_latest_frame_if_new_locked(file_path, dataset_path, last_key, force):
     stat = os.stat(file_path)
     h5_file, is_swmr = _open_h5(file_path)
     with h5_file:

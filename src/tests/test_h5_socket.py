@@ -210,6 +210,37 @@ def test_load_non_hdf5_file_returns_exception(tmp_path):
     assert isinstance(h5_socket.load_latest_h5_frame(str(path)), Exception)
 
 
+def test_hdf5_reads_never_overlap(stack_file, monkeypatch):
+    """The JPEG and numeric workers for one detector wake on the same
+    NumCaptured_RBV update. Opening the file from two threads at once returned
+    another frame's data with HDF5 2.0, so reads run one at a time."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    real_open = h5_socket._open_h5
+    active = 0
+    most_active = 0
+    count_lock = threading.Lock()
+
+    def slow_open(file_path):
+        nonlocal active, most_active
+        with count_lock:
+            active += 1
+            most_active = max(most_active, active)
+        time.sleep(0.05)
+        with count_lock:
+            active -= 1
+        return real_open(file_path)
+
+    monkeypatch.setattr(h5_socket, "_open_h5", slow_open)
+    with ThreadPoolExecutor(4) as pool:
+        frames = list(pool.map(lambda _: h5_socket.read_latest_frame_if_new(str(stack_file))[1], range(4)))
+
+    assert most_active == 1
+    for frame in frames:
+        np.testing.assert_array_equal(frame, gradient(scale=50))
+
+
 def test_log_and_linear_normalization_differ(stack_file):
     log_frame = h5_socket.load_latest_h5_frame(str(stack_file), use_log_normalization=True)
     linear_frame = h5_socket.load_latest_h5_frame(str(stack_file), use_log_normalization=False)
