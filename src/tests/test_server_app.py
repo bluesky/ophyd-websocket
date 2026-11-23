@@ -68,6 +68,7 @@ def test_root_endpoint_lists_every_socket_and_rest_endpoint(client):
         "camera_socket_shared",
         "tiff_socket",
         "h5_socket",
+        "h5_array_socket",
         "qs_console_socket",
         "device_socket",
     }
@@ -85,6 +86,7 @@ def test_websockets_endpoint_documents_each_socket(client):
         "camera_socket_shared",
         "tiff_socket",
         "h5_socket",
+        "h5_array_socket",
         "qs_console_socket",
     }
     for name, info in sockets.items():

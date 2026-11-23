@@ -539,6 +539,37 @@ Your first message to `/api/v1/h5-socket` picks the detector:
 
 To try it without hardware, run `python caproto/sim_hdf5_detector_ioc.py --list-pvs`. It writes rolling HDF5 files to `caproto/h5_out/`. Use `--frames-per-file 1` for Single mode and `--no-swmr` to test the fallback read.
 
+### Numeric frames: h5-array-socket
+`/api/v1/h5-array-socket` follows the same file as `/h5-socket` and takes the same first message. It sends each frame's actual pixel values instead of a JPEG, for plotting real intensities:
+```
+{"pv": "XV4040:sim_det:FullFileName_RBV", "maxDimension": 1024, "maxFps": 5}
+{"prefix": "13SIM1", "plugin": "HDF1", "dataset": "/entry/data/data"}
+```
+Each frame is one binary message:
+```
+bytes 0..3       uint32 little-endian N = header length
+bytes 4..4+N-1   UTF-8 JSON header
+rest             row-major, little-endian pixels
+```
+For example, `{"version":1,"width":1024,"height":1024,"dtype":"f4","sourceWidth":4096,"sourceHeight":4096,"binFactor":4}`. `dtype` is a Plotly typed-array code (`u1 i1 u2 i2 u4 i4 f4 f8`), so a browser can hand the bytes to Plotly as `z: {bdata, dtype, shape: "height,width"}` without converting them.
+- `maxDimension` (64–4096, default 1024): a frame that fits is sent exactly, in its own dtype. A larger one is mean-binned by `binFactor` and sent as float32. Each value is then a block mean: it keeps mean intensity, not integrated counts, and isn't meant for per-pixel analysis.
+- `maxFps` (0.5–10, default 5): each client gets at most this many frames per second, always the newest.
+- Text messages: `{"error": ...}` comes just before the server closes the socket. `{"frameError": ...}` means the newest frame couldn't be sent (for example, RGB data); the socket stays open for the next one.
+
+A minimal Python client:
+```python
+import json, struct, numpy as np, websockets
+
+async with websockets.connect("ws://localhost:8001/api/v1/h5-array-socket", max_size=None) as ws:
+    await ws.send(json.dumps({"action": "auth", "api_key": ""}))   # always safe; required when auth is on
+    await ws.recv()
+    await ws.send(json.dumps({"pv": "XV4040:sim_det:FullFileName_RBV"}))
+    msg = await ws.recv()
+    n = struct.unpack_from("<I", msg)[0]
+    header = json.loads(msg[4:4 + n])
+    frame = np.frombuffer(msg[4 + n:], np.dtype(header["dtype"]).newbyteorder("<")).reshape(header["height"], header["width"])
+```
+
 ## "Ophyd as a Service" REST API
 After starting the server navigate to [http://localhost:8001/docs](http://localhost:8001/docs) to see endpoints and try out functionality. 
 

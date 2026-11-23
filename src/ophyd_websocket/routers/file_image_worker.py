@@ -281,6 +281,11 @@ class SharedFileImageWorker:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     latest_frame: bytes | None = None
     frame_version: int = 0
+    # Why the newest file could not be turned into a frame, cleared by the next
+    # good frame. ``error_version`` bumps only when the message changes, so a
+    # file that keeps failing the same way is reported once.
+    last_error: str | None = None
+    error_version: int = 0
     use_log_normalization: bool = True
     pending_file_path: str | None = None
     pending_force: bool = False
@@ -391,8 +396,14 @@ class SharedFileImageWorker:
                 continue
             if isinstance(result, Exception):
                 logger.info("Skipping image due to processing error: %s", result)
+                message = str(result) or type(result).__name__
+                if message != self.last_error:
+                    self.last_error = message
+                    self.error_version += 1
+                    await self._notify_update()
                 continue
 
+            self.last_error = None
             self.latest_frame = result
             self.frame_version += 1
             logger.debug("Published frame %s from %s", self.frame_version, file_path)
@@ -436,28 +447,63 @@ class WorkerRegistry:
 
 
 async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, registry: WorkerRegistry,
-                       label: str = "file", session: WsAuthSession | None = None):
+                       label: str = "file", session: WsAuthSession | None = None, *,
+                       max_fps: float | None = None, allow_log_toggle: bool = True,
+                       send_frame_errors: bool = False):
     """Stream ``worker``'s frames to ``websocket`` until it disconnects
-    (or, with auth on, until the session's key stops validating)."""
+    (or, with auth on, until the session's key stops validating).
+
+    ``max_fps`` caps this subscriber's send rate. Frames that arrive while it
+    waits are not queued: when the wait ends it sends whatever frame is newest
+    then. ``allow_log_toggle=False`` ignores ``toggleLogNormalization`` (for
+    workers whose frames are not normalized). ``send_frame_errors`` reports a
+    file the worker could not turn into a frame as ``{"frameError": "..."}``,
+    leaving the socket open for the next good frame. The defaults keep the
+    original behaviour: every frame as fast as it comes, errors only logged.
+    """
     session = session or WsAuthSession(need="read")
     worker.sockets.add(websocket)
+    min_interval = 1.0 / max_fps if max_fps else 0.0
 
     async def sender_loop():
-        # Initialise to current version so wait_for only triggers on FUTURE changes.
+        loop = asyncio.get_running_loop()
+        # Initialise to current versions so wait_for only triggers on FUTURE changes.
         last_frame_version = worker.frame_version
+        last_error_version = worker.error_version
+        next_send_at = 0.0
+
+        def has_news():
+            return worker.frame_version != last_frame_version or (
+                send_frame_errors and worker.error_version != last_error_version
+            )
+
+        if send_frame_errors and worker.last_error is not None and worker.latest_frame is None:
+            await websocket.send_text(json.dumps({"frameError": worker.last_error}))
 
         if worker.latest_frame is not None:
             await websocket.send_bytes(worker.latest_frame)
+            next_send_at = loop.time() + min_interval
 
         while True:
             async with worker.condition:
-                await worker.condition.wait_for(
-                    lambda: worker.frame_version != last_frame_version
-                )
+                await worker.condition.wait_for(has_news)
+
+            if min_interval:
+                delay = next_send_at - loop.time()
+                if delay > 0:
+                    # Newer frames may land meanwhile; the versions are read after.
+                    await asyncio.sleep(delay)
+
+            if send_frame_errors and worker.error_version != last_error_version:
+                last_error_version = worker.error_version
+                # A good frame since the error clears it: nothing to report.
+                if worker.last_error is not None:
+                    await websocket.send_text(json.dumps({"frameError": worker.last_error}))
 
             if worker.frame_version != last_frame_version and worker.latest_frame is not None:
                 last_frame_version = worker.frame_version
                 await websocket.send_bytes(worker.latest_frame)
+                next_send_at = loop.time() + min_interval
 
     async def receiver_loop():
         while True:
@@ -465,6 +511,10 @@ async def serve_worker(websocket: WebSocket, worker: SharedFileImageWorker, regi
             data = json.loads(message)
             if is_auth_message(data):
                 await session.handle_auth_message(websocket, data)
+                continue
+            if "toggleLogNormalization" in data and not allow_log_toggle:
+                # Shared worker: one client must not change what the others see.
+                logger.debug("%s socket ignored toggleLogNormalization", label)
                 continue
             if "toggleLogNormalization" in data:
                 worker.use_log_normalization = bool(data["toggleLogNormalization"])

@@ -120,6 +120,31 @@ def read_latest_frame(dataset):
     return np.asarray(frame)
 
 
+def read_latest_frame_if_new(file_path, dataset_path=None, last_key=None, force=False):
+    """Read the newest frame of ``file_path`` unless it is the one ``last_key`` names.
+
+    Returns ``(key, frame)``, or ``None`` when the file still ends on the frame
+    identified by ``last_key`` (and ``force`` is off). The key covers the path,
+    dataset, frame count and the file's mtime/size, so a frame appended to the
+    same file, or a rewritten file, counts as new. Raises on any read failure.
+    """
+    wait_for_readable_file(file_path)
+    stat = os.stat(file_path)
+    h5_file, is_swmr = _open_h5(file_path)
+    with h5_file:
+        dataset = find_image_dataset(h5_file, dataset_path)
+        if is_swmr:
+            dataset.refresh()
+        key = (file_path, dataset.name, frame_count(dataset), stat.st_mtime_ns, stat.st_size)
+        if not force and key == last_key:
+            logger.debug("HDF5 frame unchanged, skipping decode: %s", key)
+            return None
+        frame = read_latest_frame(dataset)
+        logger.debug("Loaded HDF5 frame %s of %s:%s, shape %s, dtype %s (swmr=%s)",
+                     key[2], file_path, dataset.name, frame.shape, frame.dtype, is_swmr)
+    return key, frame
+
+
 class H5FrameLoader:
     """Loader for :class:`SharedFileImageWorker` that remembers what it decoded.
 
@@ -135,20 +160,10 @@ class H5FrameLoader:
 
     def __call__(self, file_path, use_log_normalization, force=False):
         try:
-            wait_for_readable_file(file_path)
-            stat = os.stat(file_path)
-            h5_file, is_swmr = _open_h5(file_path)
-            with h5_file:
-                dataset = find_image_dataset(h5_file, self.dataset_path)
-                if is_swmr:
-                    dataset.refresh()
-                key = (file_path, dataset.name, frame_count(dataset), stat.st_mtime_ns, stat.st_size)
-                if not force and key == self.last_decoded:
-                    logger.debug("HDF5 frame unchanged, skipping decode: %s", key)
-                    return None
-                frame = read_latest_frame(dataset)
-                logger.debug("Loaded HDF5 frame %s of %s:%s, shape %s, dtype %s (swmr=%s)",
-                             key[2], file_path, dataset.name, frame.shape, frame.dtype, is_swmr)
+            loaded = read_latest_frame_if_new(file_path, self.dataset_path, self.last_decoded, force)
+            if loaded is None:
+                return None
+            key, frame = loaded
 
             result = encode_array_to_jpeg(frame, use_log_normalization)
             if isinstance(result, Exception):

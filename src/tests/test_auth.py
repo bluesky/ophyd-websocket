@@ -21,6 +21,7 @@ from ophyd_websocket.routers import (
     camera_shared_socket,
     core_api,
     file_image_worker,
+    h5_array_socket,
     h5_socket,
     pv_socket,
     qs_console_socket,
@@ -757,6 +758,7 @@ def no_signals_allowed(monkeypatch):
         ("/api/v1/camera-socket-shared?device=cam", {}),
         ("/api/v1/tiff-socket", {"prefix": "SIMTIFF1"}),
         ("/api/v1/h5-socket", {"prefix": "SIMHDF1"}),
+        ("/api/v1/h5-array-socket", {"prefix": "SIMHDF1"}),
         ("/api/v1/camera-socket", {"imageArray_PV": "SIM:image1:ArrayData"}),
     ],
 )
@@ -770,6 +772,28 @@ def test_unauthenticated_streams_create_nothing(client, auth_enabled, no_signals
     assert camera_shared_socket._workers == {}
     assert tiff_socket._workers == {}
     assert h5_socket._workers == {}
+    assert h5_array_socket._workers == {}
+
+
+def test_observer_can_open_the_numeric_h5_stream(client, auth_enabled, no_signals_allowed):
+    with client.websocket_connect("/api/v1/h5-array-socket") as ws:
+        assert ws_auth(ws, OBSERVER)["ok"] is True
+        ws.send_json({"prefix": "SIMHDF1"})
+        # Re-auth mid-stream is acknowledged like on every other file socket.
+        ws.send_json({"action": "auth", "api_key": OBSERVER})
+        assert ws.receive_json()["ok"] is True
+
+    assert no_signals_allowed == ["SIMHDF1:HDF1:FullFileName_RBV", "SIMHDF1:HDF1:NumCaptured_RBV"]
+
+
+def test_numeric_h5_stream_rejects_a_bad_key(client, auth_enabled, no_signals_allowed):
+    with client.websocket_connect("/api/v1/h5-array-socket") as ws:
+        ws.send_json({"action": "auth", "api_key": "not-a-real-key"})
+        messages, code = expect_close(ws)
+
+    assert code == auth.WS_POLICY_VIOLATION
+    assert messages[0]["ok"] is False
+    assert no_signals_allowed == []
 
 
 def test_observer_can_open_a_file_stream(client, auth_enabled, no_signals_allowed):

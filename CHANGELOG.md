@@ -166,6 +166,34 @@ Merged from the `feat/ophyd-async` → `feat/h5-stream` → `feat/video-stream`
   `apiKey` and `token`. A key is only accepted in the auth message.
 - `OAS_ALLOWED_ORIGINS` parsing moved to `ophyd_websocket.auth`.
 
+### Numeric HDF5 stream (`feat/h5-raw-socket`)
+
+#### Added
+- `/api/v1/h5-array-socket` sends the newest HDF5 detector frame as its raw
+  pixel values instead of a JPEG, for numeric plots (Finch's heatmap). It
+  follows the file the same way `/h5-socket` does and takes the same init
+  message (`pv` or `prefix`/`plugin`, `dataset`, `triggerPV`) and auth
+  handshake. Each frame is one binary message: a uint32 little-endian header
+  length, a JSON header (`version`, `width`, `height`, `dtype`, `sourceWidth`,
+  `sourceHeight`, `binFactor`), then row-major little-endian pixels. Supported
+  types are uint8/16/32, int8/16/32 and float32/64. Colour, bool, 64-bit
+  integer and complex frames are refused with a `{"frameError": ...}` text
+  message, and the socket stays open.
+- `maxDimension` (64–4096, default 1024): a larger frame is mean-binned to
+  float32 by one integer factor, with partial edge blocks averaged over their
+  real pixels. A frame that fits is sent exactly, in its own dtype.
+- `maxFps` (0.5–10, default 5) caps each client's send rate. Frames that land
+  while a client waits are not queued; it gets the newest one.
+- `serve_worker` takes `max_fps`, `allow_log_toggle` and `send_frame_errors`.
+  Their defaults keep the existing sockets' behaviour.
+
+#### Changed
+- `h5_socket.read_latest_frame_if_new()` now does the HDF5 read and
+  unchanged-frame check for both HDF5 sockets. `/h5-socket` output is
+  unchanged.
+- `SharedFileImageWorker` records the newest load error (`last_error`,
+  `error_version`). Only the numeric socket sends it to clients.
+
 ## [0.1.0]
 
 First release.

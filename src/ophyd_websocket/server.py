@@ -14,6 +14,7 @@ from ophyd_websocket.routers.camera_socket import router as camera_socket_router
 from ophyd_websocket.routers.camera_shared_socket import router as camera_shared_socket_router
 from ophyd_websocket.routers.tiff_socket import router as tiff_socket_router
 from ophyd_websocket.routers.h5_socket import router as h5_socket_router
+from ophyd_websocket.routers.h5_array_socket import router as h5_array_socket_router
 from ophyd_websocket.routers.qs_console_socket import router as qs_console_socket_router
 from ophyd_websocket.routers.core_api import router as core_api_router
 from ophyd_websocket.routers.device_socket import router as device_socket_router
@@ -258,6 +259,7 @@ app.include_router(camera_socket_router, prefix="/api/v1", tags=["Camera Streami
 app.include_router(camera_shared_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(tiff_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(h5_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
+app.include_router(h5_array_socket_router, prefix="/api/v1", tags=["Camera Streaming"])
 app.include_router(qs_console_socket_router, prefix="/api/v1", tags=["Queue Server"])
 app.include_router(device_socket_router, prefix="/api/v1", tags=["Device WebSocket"])
 app.include_router(core_api_router, prefix="/api/v1")
@@ -325,6 +327,24 @@ def list_websockets():
                     "toggle_log_example": {"toggleLogNormalization": True}
                 }
             },
+            "h5_array_socket": {
+                "endpoint": "/api/v1/h5-array-socket",
+                "description": "Like h5-socket, but each frame is sent as its raw pixel values for "
+                               "numeric plotting: one binary message per frame, a uint32 little-endian "
+                               "header length, a JSON header {version, width, height, dtype, sourceWidth, "
+                               "sourceHeight, binFactor}, then row-major little-endian pixels. Frames "
+                               "larger than maxDimension (64-4096, default 1024) are mean-binned to "
+                               "float32; each client gets at most maxFps (0.5-10, default 5) frames/s, "
+                               "always the newest. Text messages: {error} before a close, {frameError} "
+                               "when a frame can't be sent (e.g. RGB) with the socket left open",
+                "example_url": f"{BASE_WS_URL}/api/v1/h5-array-socket",
+                "format": "Binary: header length + JSON header + raw numeric pixels",
+                "example_messages": {
+                    "init_pv_example": {"pv": "13SIM1:HDF1:FullFileName_RBV"},
+                    "init_full_example": {"prefix": "13SIM1", "plugin": "HDF1", "dataset": "/entry/data/data",
+                                          "maxDimension": 1024, "maxFps": 5}
+                }
+            },
             "qs_console_socket": {
                 "endpoint": "/api/v1/qs-console-socket",
                 "description": "Queue server console output",
@@ -369,6 +389,7 @@ def read_root():
                 "camera_socket_shared": f"{BASE_WS_URL}/api/v1/camera-socket-shared",
                 "tiff_socket": f"{BASE_WS_URL}/api/v1/tiff-socket",
                 "h5_socket": f"{BASE_WS_URL}/api/v1/h5-socket",
+                "h5_array_socket": f"{BASE_WS_URL}/api/v1/h5-array-socket",
                 "qs_console_socket": f"{BASE_WS_URL}/api/v1/qs-console-socket",
                 "device_socket": f"{BASE_WS_URL}/api/v1/device-socket"
             },
