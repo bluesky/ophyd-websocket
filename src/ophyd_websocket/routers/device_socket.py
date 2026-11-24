@@ -279,6 +279,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
         await websocket.send_json({"message": f"Successfully set {device_name} to {value}"})
 
+    # In-flight `set` tasks. A set can take as long as the move itself, so it
+    # must never be awaited inline in the receive loop -- that would stall
+    # every later message (a new setpoint for the same device, a set on a
+    # different device, unsubscribe, ...) until the move finished. Holding a
+    # reference keeps the tasks from being garbage-collected mid-flight.
+    set_tasks = set()
+
+    async def _run_set(data):
+        try:
+            await handleSet(data)
+        except (WebSocketDisconnect, RuntimeError):
+            # Socket closed before the move finished; the move itself keeps
+            # going, there's just nobody left to report the result to.
+            logger.debug(f"Connection closed before set of {data.get('device')} completed")
+        except Exception as e:
+            logger.error(f"Unexpected error during set: {str(e)}", exc_info=True)
+            try:
+                await websocket.send_json({"error": f"Unexpected error: {str(e)}"})
+            except Exception:
+                pass
+
     try:
         async with session.guard(websocket):
             while True:
@@ -314,7 +335,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     elif action == "refresh":
                         await handleRefresh()
                     elif action == "set":
-                        await handleSet(data)
+                        task = asyncio.create_task(_run_set(data))
+                        set_tasks.add(task)
+                        task.add_done_callback(set_tasks.discard)
 
                 except json.JSONDecodeError:
                     await websocket.send_json({"error": "Invalid JSON format"})
